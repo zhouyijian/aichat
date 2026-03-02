@@ -2,13 +2,11 @@
 .DS_Store
 
 # Xcode
-DerivedData/
 build/
-*.xcuserdata/
+DerivedData/
+*.xcworkspace
+xcuserdata/
 *.xcuserstate
-*.moved-aside
-*.xccheckout
-*.xcscmblueprint
 
 # SPM
 .build/

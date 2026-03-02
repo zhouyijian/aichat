@@ -8,14 +8,36 @@
 import UIKit
 import SnapKit
 
+final class ChatViewController: UIViewController {
 
- class ChatViewController: UIViewController {
+    // MARK: - Dependencies
+    let viewModel = ChatViewModel(repository: MockMessageRepository())
 
+    // MARK: - UI
+    var collectionView: UICollectionView!
+    var dataSource: UICollectionViewDiffableDataSource<Section, UUID>!
+    lazy var sizingCell = MessageCell(frame: .zero)
 
-    private var collectionView: UICollectionView!
-    private var dataSource: UICollectionViewDiffableDataSource<Section, Message>!
-    private var messages: [Message] = []
+    let scrollToBottomButton: UIButton = {
+        var config = UIButton.Configuration.filled()
+        config.title = "回到底部"
+        config.baseBackgroundColor = .secondarySystemBackground
+        config.baseForegroundColor = .label
+        config.cornerStyle = .capsule
+        config.contentInsets = NSDirectionalEdgeInsets(top: 8, leading: 12, bottom: 8, trailing: 12)
 
+        let button = UIButton(configuration: config)
+        button.configurationUpdateHandler = { btn in
+            btn.configuration?.baseBackgroundColor = .secondarySystemBackground
+        }
+        button.isHidden = true
+        return button
+    }()
+
+    // MARK: - Interaction State
+    var userIsInteracting = false
+
+    // MARK: - Lifecycle
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
@@ -23,18 +45,75 @@ import SnapKit
 
         setupCollectionView()
         setupDataSource()
-        loadMockData()
+        setupScrollToBottomButton()
         applySnapshot()
+        registerTraitObservers()
+        #if DEBUG
+        setupDebugMockActions()
+        #endif
     }
 
-    private func setupCollectionView() {
+    override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
+        super.viewWillTransition(to: size, with: coordinator)
+
+        coordinator.animate(alongsideTransition: nil) { [weak self] _ in
+            guard let self else { return }
+            self.viewModel.invalidateAllHeights()
+            self.collectionView.collectionViewLayout.invalidateLayout()
+            self.collectionView.reloadData()
+            self.updateScrollToBottomButtonVisibility()
+        }
+    }
+}
+
+// MARK: - Setup
+extension ChatViewController {
+    func registerTraitObservers() {
+        registerForTraitChanges(
+            [UITraitPreferredContentSizeCategory.self]
+        ) { (self: Self, _) in
+            self.handleContentSizeCategoryChange()
+        }
+    }
+
+    #if DEBUG
+    func setupDebugMockActions() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            self?.appendMessage(Message(role: .assistant, content: "append test message"), scrollToBottom: true)
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            guard let self else { return }
+            let streamingMessage = Message(role: .assistant, content: "")
+            self.appendMessage(streamingMessage, scrollToBottom: true)
+            let targetID = streamingMessage.id
+            var counter = 0
+            Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { [weak self] timer in
+                guard let self else {
+                    timer.invalidate()
+                    return
+                }
+                counter += 1
+                let chunk = " 流式片段\(counter)"
+                let updated = self.viewModel.updateMessage(id: targetID) { msg in
+                    msg.content += chunk
+                }
+                if updated {
+                    self.updateMessageUI(id: targetID)
+                }
+                if counter >= 20 {
+                    timer.invalidate()
+                }
+            }
+        }
+    }
+    #endif
+
+    func setupCollectionView() {
         let layout = UICollectionViewFlowLayout()
         layout.scrollDirection = .vertical
         layout.minimumLineSpacing = 10
         layout.minimumInteritemSpacing = 0
-        
-
-        // 整体 padding（上下左右留白）
         layout.sectionInset = UIEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
         layout.estimatedItemSize = .zero
 
@@ -44,8 +123,6 @@ import SnapKit
         collectionView.delegate = self
 
         collectionView.register(MessageCell.self, forCellWithReuseIdentifier: MessageCell.reuseID)
-
-        collectionView.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(collectionView)
 
         collectionView.snp.makeConstraints { make in
@@ -53,64 +130,21 @@ import SnapKit
         }
     }
 
-    private func setupDataSource() {
-        dataSource = UICollectionViewDiffableDataSource<Section, Message>(
-            collectionView: collectionView
-        ) { collectionView, indexPath, message in
-
-            guard let cell = collectionView.dequeueReusableCell(
-                withReuseIdentifier: MessageCell.reuseID,
-                for: indexPath
-            ) as? MessageCell else {
-                return UICollectionViewCell()
-            }
-
-            cell.configure(with: message)
-            return cell
+    func setupScrollToBottomButton() {
+        view.addSubview(scrollToBottomButton)
+        scrollToBottomButton.snp.makeConstraints { make in
+            make.trailing.equalToSuperview().inset(16)
+            make.bottom.equalTo(view.safeAreaLayoutGuide).inset(16)
         }
+
+        scrollToBottomButton.addTarget(self, action: #selector(didTapScrollToBottom), for: .touchUpInside)
     }
 
-    private func loadMockData() {
-        messages = [
-            Message(role: .user, content: "Hello"),
-            Message(role: .assistant, content: "Hi! This is a static chat cell."),
-            Message(role: .user, content: "Hello2"),
-            Message(role: .user, content: "Hello3"),
-            Message(role: .assistant, content: "Hi! This is a static chat cell2.Hi! This is a static chat cell2.Hi! This is a static chat cell2.Hi! This is a static chat cell2.Hi! This is a static chat cell2.Hi! This is a static chat cell2.")
-        ]
-    }
-
-    private func applySnapshot() {
-        var snapshot = NSDiffableDataSourceSnapshot<Section, Message>()
-        snapshot.appendSections([.main])
-        snapshot.appendItems(messages, toSection: .main)
-        dataSource.apply(snapshot, animatingDifferences: true)
-    }
-}
-
-extension ChatViewController: UICollectionViewDelegateFlowLayout {
-
-    func collectionView(_ collectionView: UICollectionView,
-                        layout collectionViewLayout: UICollectionViewLayout,
-                        sizeForItemAt indexPath: IndexPath) -> CGSize {
-
-        let layout = collectionViewLayout as! UICollectionViewFlowLayout
-        let insets = layout.sectionInset
-        let width = collectionView.bounds.width - insets.left - insets.right
-
-        // 用一个“离屏 cell”算高度（缓存会更好，这里先给你最直观的）
-        let cell = MessageCell(frame: CGRect(x: 0, y: 0, width: width, height: 1000))
-        cell.layoutIfNeeded()
-
-        cell.configure(with:  messages[indexPath.item])
-
-        let target = CGSize(width: width, height: UIView.layoutFittingCompressedSize.height)
-        let size = cell.contentView.systemLayoutSizeFitting(
-            target,
-            withHorizontalFittingPriority: .required,
-            verticalFittingPriority: .fittingSizeLevel
-        )
-        return CGSize(width: width, height: size.height)
+    func handleContentSizeCategoryChange() {
+        viewModel.invalidateAllHeights()
+        collectionView.collectionViewLayout.invalidateLayout()
+        collectionView.reloadData()
+        updateScrollToBottomButtonVisibility()
     }
 }
 
