@@ -51,15 +51,14 @@ extension ChatViewController {
     }
 
     /// Refreshes one message row and optionally keeps viewport pinned to bottom.
-    func updateMessageUI(id: UUID) {
-        let shouldFollow = isNearBottom()
+    func updateMessageUI(id: UUID, shouldPinToBottom: Bool) {
         let width = itemWidth()
         let scale = collectionView.traitCollection.displayScale
 
         viewModel.invalidateHeight(for: id, width: width, displayScale: scale)
         reconfigureMessage(id: id, animated: false)
 
-        guard shouldFollow else { return }
+        guard shouldPinToBottom else { return }
         DispatchQueue.main.async { [weak self] in
             self?.scrollToBottom(animated: true)
         }

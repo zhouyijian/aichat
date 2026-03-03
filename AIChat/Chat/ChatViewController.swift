@@ -17,6 +17,15 @@ final class ChatViewController: UIViewController {
     var collectionView: UICollectionView!
     var dataSource: UICollectionViewDiffableDataSource<Section, UUID>!
     lazy var sizingCell = MessageCell(frame: .zero)
+    private lazy var throttler = StreamingThrottler(
+        shouldPinToBottom: { [weak self] in
+            guard let self else { return false }
+            return !self.userIsInteracting && self.isNearBottom(tolerance: 150)
+        },
+        onTick: { [weak self] id, shouldPinToBottom in
+            self?.updateMessageUI(id: id, shouldPinToBottom: shouldPinToBottom)
+        }
+    )
 
     let scrollToBottomButton: UIButton = {
         var config = UIButton.Configuration.filled()
@@ -53,6 +62,11 @@ final class ChatViewController: UIViewController {
         #endif
     }
 
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        throttler.stop(flushPending: false)
+    }
+    
     override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
         super.viewWillTransition(to: size, with: coordinator)
 
@@ -88,7 +102,7 @@ extension ChatViewController {
             self.appendMessage(streamingMessage, scrollToBottom: true)
             let targetID = streamingMessage.id
             var counter = 0
-            Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { [weak self] timer in
+            Timer.scheduledTimer(withTimeInterval: 0.02, repeats: true) { [weak self] timer in
                 guard let self else {
                     timer.invalidate()
                     return
@@ -99,10 +113,15 @@ extension ChatViewController {
                     msg.content += chunk
                 }
                 if updated {
-                    self.updateMessageUI(id: targetID)
+                    Task { @MainActor [weak self] in
+                        self?.throttler.markChanged(id: targetID)
+                    }
                 }
-                if counter >= 20 {
+                if counter >= 100 {
                     timer.invalidate()
+                    Task { @MainActor [weak self] in
+                        self?.throttler.stop()
+                    }
                 }
             }
         }
@@ -145,6 +164,10 @@ extension ChatViewController {
         collectionView.collectionViewLayout.invalidateLayout()
         collectionView.reloadData()
         updateScrollToBottomButtonVisibility()
+    }
+
+    func disableAutoPinForCurrentStream() {
+        throttler.disablePinToBottomForCurrentStream()
     }
 }
 

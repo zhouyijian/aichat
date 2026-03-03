@@ -8,7 +8,7 @@ extension ChatViewController {
     }
 
     func updateScrollToBottomButtonVisibility() {
-        scrollToBottomButton.isHidden = isNearBottom(tolerance: 150)
+        scrollToBottomButton.isHidden = isNearBottom(tolerance: 450)
     }
 
     func isNearBottom(tolerance: CGFloat = 60) -> Bool {
@@ -34,6 +34,7 @@ extension ChatViewController {
 
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
         userIsInteracting = true
+        disableAutoPinForCurrentStream()
     }
 
     func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
