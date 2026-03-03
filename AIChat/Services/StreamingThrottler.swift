@@ -42,7 +42,7 @@ final class StreamingThrottler {
         }
     }
 
-    /// 用户手动滚动时，关闭当前流式会话的自动跟随到底部。
+    /// 用户手动滚动时，关闭当前流式会话的自动跟随到底部
     func disablePinToBottomForCurrentStream() {
         shouldPinToBottomForCurrentStream = false
     }
