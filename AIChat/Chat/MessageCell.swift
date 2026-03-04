@@ -49,19 +49,23 @@ final class MessageCell: UICollectionViewCell {
     }
     
     func configure(with message: Message) {
-        messageLabel.text = message.content
         updateAlignment(for: message.role)
         
         switch message.role {
         case .user:
             bubbleView.backgroundColor = .systemBlue
             messageLabel.textColor = .white
+            messageLabel.attributedText = nil
+            messageLabel.text = message.content
         case .assistant:
             bubbleView.backgroundColor = .secondarySystemBackground
             messageLabel.textColor = .label
+            messageLabel.attributedText = makeAssistantText(content: message.content)
         case .system:
             bubbleView.backgroundColor = .systemGray5
             messageLabel.textColor = .secondaryLabel
+            messageLabel.attributedText = nil
+            messageLabel.text = message.content
         }
     }
 
@@ -82,6 +86,52 @@ final class MessageCell: UICollectionViewCell {
     
     override func prepareForReuse() {
         super.prepareForReuse()
+        messageLabel.attributedText = nil
         messageLabel.text = nil
+    }
+
+    private func makeAssistantText(content: String) -> NSAttributedString {
+        let fullRange = NSRange(location: 0, length: (content as NSString).length)
+        let result = NSMutableAttributedString(string: content, attributes: [
+            .font: UIFont.systemFont(ofSize: 16),
+            .foregroundColor: UIColor.label
+        ])
+
+        if let range = reasoningRange(in: content) {
+            result.addAttributes([
+                .font: UIFont.systemFont(ofSize: 13),
+                .foregroundColor: UIColor.secondaryLabel
+            ], range: range)
+        } else {
+            result.addAttributes([
+                .font: UIFont.systemFont(ofSize: 16),
+                .foregroundColor: UIColor.label
+            ], range: fullRange)
+        }
+
+        return result
+    }
+
+    private func reasoningRange(in text: String) -> NSRange? {
+        if let startRange = text.range(of: "<think>") {
+            if let endRange = text.range(of: "</think>"),
+               startRange.lowerBound < endRange.lowerBound {
+                return NSRange(startRange.lowerBound..<endRange.upperBound, in: text)
+            }
+            // 流式中间态：还没收到 </think> 时，先把 <think> 到当前末尾都按思考样式展示
+            return NSRange(startRange.lowerBound..<text.endIndex, in: text)
+        }
+
+        let titles = ["思考过程：", "思考过程:", "Reasoning:", "Reasoning：", "Thought process:", "Thought process："]
+        for title in titles {
+            if text.hasPrefix(title) {
+                if let splitRange = text.range(of: "\n\n") {
+                    return NSRange(text.startIndex..<splitRange.lowerBound, in: text)
+                }
+                return NSRange(text.startIndex..<text.endIndex, in: text)
+            }
+        }
+
+        return nil
     }
 }

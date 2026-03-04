@@ -62,6 +62,10 @@ final class OpenAIEventSourceClient {
             "model": model,
             "stream": true,
             "messages": [
+                [
+                    "role": "system",
+                    "content": "请始终使用简体中文输出，包括思考过程"
+                ],
                 ["role": "user", "content": prompt]
             ]
         ]
