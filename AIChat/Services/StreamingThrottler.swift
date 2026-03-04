@@ -72,7 +72,7 @@ final class StreamingThrottler {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: self.intervalNs)
                 if Task.isCancelled { break }
-                if !self.hasPendingChanges { break }
+                if !self.hasPendingChanges { continue }
 
                 self.hasPendingChanges = false
 

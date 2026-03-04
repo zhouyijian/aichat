@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		F980B91E2F529A3500E689FA /* SnapKit in Frameworks */ = {isa = PBXBuildFile; productRef = F980B91D2F529A3500E689FA /* SnapKit */; };
+		F9DC44612F56D3680035E45A /* LDSwiftEventSource in Frameworks */ = {isa = PBXBuildFile; productRef = F9DC44602F56D3680035E45A /* LDSwiftEventSource */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -40,6 +41,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				F9DC44612F56D3680035E45A /* LDSwiftEventSource in Frameworks */,
 				F980B91E2F529A3500E689FA /* SnapKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -84,6 +86,7 @@
 			name = AIChat;
 			packageProductDependencies = (
 				F980B91D2F529A3500E689FA /* SnapKit */,
+				F9DC44602F56D3680035E45A /* LDSwiftEventSource */,
 			);
 			productName = AIChat;
 			productReference = F980B8FC2F528D9E00E689FA /* AIChat.app */;
@@ -115,6 +118,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				F980B91C2F529A3500E689FA /* XCRemoteSwiftPackageReference "SnapKit" */,
+				F9DC445F2F56D3680035E45A /* XCRemoteSwiftPackageReference "swift-eventsource" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = F980B8FD2F528D9E00E689FA /* Products */;
@@ -362,6 +366,14 @@
 				minimumVersion = 5.7.1;
 			};
 		};
+		F9DC445F2F56D3680035E45A /* XCRemoteSwiftPackageReference "swift-eventsource" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/launchdarkly/swift-eventsource";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 3.3.0;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -369,6 +381,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = F980B91C2F529A3500E689FA /* XCRemoteSwiftPackageReference "SnapKit" */;
 			productName = SnapKit;
+		};
+		F9DC44602F56D3680035E45A /* LDSwiftEventSource */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = F9DC445F2F56D3680035E45A /* XCRemoteSwiftPackageReference "swift-eventsource" */;
+			productName = LDSwiftEventSource;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

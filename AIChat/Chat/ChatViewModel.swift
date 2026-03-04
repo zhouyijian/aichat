@@ -37,6 +37,22 @@ extension ChatViewModel {
         mutate(&messages[idx])
         return true
     }
+    
+    func appendContent(to id: UUID, delta: String) {
+        guard let idx = messages.firstIndex(where: { $0.id == id }) else { return }
+        messages[idx].content += delta
+    }
+
+    func setContent(for id: UUID, text: String) {
+        guard let idx = messages.firstIndex(where: { $0.id == id }) else { return }
+        messages[idx].content = text
+    }
+
+    /// 可选：流式开始/结束时更新状态（面试加分）
+    func setStatus(for id: UUID, status: Message.Status) {
+        guard let idx = messages.firstIndex(where: { $0.id == id }) else { return }
+        messages[idx].status = status
+    }
 }
 
 // MARK: - Height Cache Operations

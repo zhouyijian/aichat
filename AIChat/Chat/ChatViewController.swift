@@ -45,6 +45,8 @@ final class ChatViewController: UIViewController {
 
     // MARK: - Interaction State
     var userIsInteracting = false
+    private let openAI = OpenAIEventSourceClient(apiKey: "sk-api-ChgdHUf72NG1ZlFM_NvBuZeb7EYw3KsTf_L8enlR-gl4RngF2DgK04kF443WE-DnDpx50S5jkT6kFYgo-uDbjx3UO0wTqF_cfSe-2GM-AOBu40zWfEqwpk4")
+
 
     // MARK: - Lifecycle
     override func viewDidLoad() {
@@ -64,6 +66,7 @@ final class ChatViewController: UIViewController {
 
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
+        openAI.stop()
         throttler.stop(flushPending: false)
     }
     
@@ -77,6 +80,50 @@ final class ChatViewController: UIViewController {
             self.collectionView.reloadData()
             self.updateScrollToBottomButtonVisibility()
         }
+    }
+    
+    private func startOpenAIStream(prompt: String, assistantID: UUID) {
+        openAI.startStream(
+            prompt: prompt,
+            onDelta: { [weak self] delta in
+                guard let self else { return }
+                Task { @MainActor in
+                    self.viewModel.appendContent(to: assistantID, delta: delta)
+                    self.throttler.markChanged(id: assistantID)
+                }
+            },
+            onDone: { [weak self] in
+                guard let self else { return }
+                Task { @MainActor in
+                    self.updateMessageUI(id: assistantID, shouldPinToBottom: false) // 最后一帧
+                    self.openAI.stop()
+                    self.throttler.stop()
+                }
+            },
+            onError: { [weak self] error in
+                guard let self else { return }
+                Task { @MainActor in
+                    print(error)
+                    self.viewModel.setContent(for: assistantID, text: "❌ \(error.localizedDescription)\n\n（需要在 OpenAI 平台开通/充值 API 配额）")
+                    self.updateMessageUI(id: assistantID, shouldPinToBottom: false)
+                    self.openAI.stop()
+                    self.throttler.stop()
+                }
+            }
+        )
+    }
+    
+    private func sendPrompt(_ prompt: String) {
+        // 1) user 消息
+        let userMsg = Message(role: .user, content: prompt)
+        appendMessage(userMsg, scrollToBottom: true)
+
+        // 2) assistant 占位消息（空内容）
+        let assistantMsg = Message(role: .assistant, content: "")
+        appendMessage(assistantMsg, scrollToBottom: true)
+
+        // 3) 开始 SSE 流式
+        startOpenAIStream(prompt: prompt, assistantID: assistantMsg.id)
     }
 }
 
@@ -92,39 +139,11 @@ extension ChatViewController {
 
     #if DEBUG
     func setupDebugMockActions() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
-            self?.appendMessage(Message(role: .assistant, content: "append test message"), scrollToBottom: true)
-        }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
-            guard let self else { return }
-            let streamingMessage = Message(role: .assistant, content: "")
-            self.appendMessage(streamingMessage, scrollToBottom: true)
-            let targetID = streamingMessage.id
-            var counter = 0
-            Timer.scheduledTimer(withTimeInterval: 0.02, repeats: true) { [weak self] timer in
-                guard let self else {
-                    timer.invalidate()
-                    return
-                }
-                counter += 1
-                let chunk = " 流式片段\(counter)"
-                let updated = self.viewModel.updateMessage(id: targetID) { msg in
-                    msg.content += chunk
-                }
-                if updated {
-                    Task { @MainActor [weak self] in
-                        self?.throttler.markChanged(id: targetID)
-                    }
-                }
-                if counter >= 100 {
-                    timer.invalidate()
-                    Task { @MainActor [weak self] in
-                        self?.throttler.stop()
-                    }
-                }
-            }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            self?.sendPrompt("用一句话解释 SSE")
         }
+        
     }
     #endif
 
@@ -169,9 +188,9 @@ extension ChatViewController {
     func disableAutoPinForCurrentStream() {
         throttler.disablePinToBottomForCurrentStream()
     }
+    
 }
 
 #Preview("Mock Chat") {
     UINavigationController(rootViewController: ChatViewController())
 }
-
