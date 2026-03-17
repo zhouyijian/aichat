@@ -4,9 +4,14 @@ import SnapKit
 final class MessageCell: UICollectionViewCell {
     
     static let reuseID = "MessageCell"
+    var onToggleReasoning: (() -> Void)?
     
     private let bubbleView = UIView()
+    private let contentStackView = UIStackView()
     private let messageLabel = UILabel()
+    private let toggleReasoningButton = UIButton(type: .system)
+    private let reasoningContainerView = UIView()
+    private let reasoningLabel = UILabel()
     private var leadingAlignmentConstraint: Constraint?
     private var trailingAlignmentConstraint: Constraint?
     private var centerAlignmentConstraint: Constraint?
@@ -23,19 +28,39 @@ final class MessageCell: UICollectionViewCell {
     private func setupUI() {
         
         contentView.addSubview(bubbleView)
-        bubbleView.addSubview(messageLabel)
+        bubbleView.addSubview(contentStackView)
         
         bubbleView.layer.cornerRadius = 16
         bubbleView.layer.masksToBounds = true
         
+        contentStackView.axis = .vertical
+        contentStackView.spacing = 8
+        
         messageLabel.numberOfLines = 0
         messageLabel.font = .systemFont(ofSize: 16)
-        bubbleView.setContentHuggingPriority(.required, for: .horizontal)
+        
+        toggleReasoningButton.titleLabel?.font = .systemFont(ofSize: 13, weight: .medium)
+        toggleReasoningButton.contentHorizontalAlignment = .left
+        toggleReasoningButton.addTarget(self, action: #selector(didTapToggleReasoning), for: .touchUpInside)
+        
+        reasoningContainerView.layer.cornerRadius = 10
+        reasoningContainerView.layer.masksToBounds = true
+        reasoningContainerView.backgroundColor = .tertiarySystemBackground
+        
+        reasoningLabel.numberOfLines = 0
+        reasoningLabel.font = .systemFont(ofSize: 13)
+        reasoningLabel.textColor = .secondaryLabel
+        
+        contentStackView.addArrangedSubview(messageLabel)
+        contentStackView.addArrangedSubview(toggleReasoningButton)
+        contentStackView.addArrangedSubview(reasoningContainerView)
+        reasoningContainerView.addSubview(reasoningLabel)
+        
         bubbleView.setContentCompressionResistancePriority(.required, for: .horizontal)
         
         bubbleView.snp.makeConstraints { make in
             make.top.bottom.equalToSuperview().inset(6)
-            make.width.lessThanOrEqualTo(contentView.snp.width).multipliedBy(0.75)
+            make.width.lessThanOrEqualTo(contentView.snp.width).multipliedBy(0.82)
             make.leading.greaterThanOrEqualToSuperview().offset(16)
             make.trailing.lessThanOrEqualToSuperview().offset(-16)
             leadingAlignmentConstraint = make.leading.equalToSuperview().offset(16).constraint
@@ -43,8 +68,12 @@ final class MessageCell: UICollectionViewCell {
             centerAlignmentConstraint = make.centerX.equalToSuperview().constraint
         }
         
-        messageLabel.snp.makeConstraints { make in
+        contentStackView.snp.makeConstraints { make in
             make.edges.equalToSuperview().inset(12)
+        }
+        
+        reasoningLabel.snp.makeConstraints { make in
+            make.edges.equalToSuperview().inset(10)
         }
     }
     
@@ -55,17 +84,19 @@ final class MessageCell: UICollectionViewCell {
         case .user:
             bubbleView.backgroundColor = .systemBlue
             messageLabel.textColor = .white
-            messageLabel.attributedText = nil
             messageLabel.text = message.content
+            hideReasoning()
         case .assistant:
             bubbleView.backgroundColor = .secondarySystemBackground
             messageLabel.textColor = .label
-            messageLabel.attributedText = makeAssistantText(content: message.content)
+            let segments = assistantSegments(for: message)
+            messageLabel.text = segments.responseText
+            applyReasoning(segments.reasoningText, isExpanded: message.isReasoningExpanded)
         case .system:
             bubbleView.backgroundColor = .systemGray5
             messageLabel.textColor = .secondaryLabel
-            messageLabel.attributedText = nil
             messageLabel.text = message.content
+            hideReasoning()
         }
     }
 
@@ -86,52 +117,76 @@ final class MessageCell: UICollectionViewCell {
     
     override func prepareForReuse() {
         super.prepareForReuse()
-        messageLabel.attributedText = nil
         messageLabel.text = nil
+        reasoningLabel.text = nil
+        onToggleReasoning = nil
+    }
+    
+    @objc
+    private func didTapToggleReasoning() {
+        onToggleReasoning?()
     }
 
-    private func makeAssistantText(content: String) -> NSAttributedString {
-        let fullRange = NSRange(location: 0, length: (content as NSString).length)
-        let result = NSMutableAttributedString(string: content, attributes: [
-            .font: UIFont.systemFont(ofSize: 16),
-            .foregroundColor: UIColor.label
-        ])
-
-        if let range = reasoningRange(in: content) {
-            result.addAttributes([
-                .font: UIFont.systemFont(ofSize: 13),
-                .foregroundColor: UIColor.secondaryLabel
-            ], range: range)
-        } else {
-            result.addAttributes([
-                .font: UIFont.systemFont(ofSize: 16),
-                .foregroundColor: UIColor.label
-            ], range: fullRange)
-        }
-
-        return result
+    private func hideReasoning() {
+        toggleReasoningButton.isHidden = true
+        reasoningContainerView.isHidden = true
     }
-
-    private func reasoningRange(in text: String) -> NSRange? {
-        if let startRange = text.range(of: "<think>") {
-            if let endRange = text.range(of: "</think>"),
-               startRange.lowerBound < endRange.lowerBound {
-                return NSRange(startRange.lowerBound..<endRange.upperBound, in: text)
-            }
-            // 流式中间态：还没收到 </think> 时，先把 <think> 到当前末尾都按思考样式展示
-            return NSRange(startRange.lowerBound..<text.endIndex, in: text)
+    
+    private func applyReasoning(_ text: String?, isExpanded: Bool) {
+        guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            hideReasoning()
+            return
         }
-
-        let titles = ["思考过程：", "思考过程:", "Reasoning:", "Reasoning：", "Thought process:", "Thought process："]
-        for title in titles {
-            if text.hasPrefix(title) {
-                if let splitRange = text.range(of: "\n\n") {
-                    return NSRange(text.startIndex..<splitRange.lowerBound, in: text)
-                }
-                return NSRange(text.startIndex..<text.endIndex, in: text)
+        
+        toggleReasoningButton.isHidden = false
+        toggleReasoningButton.setTitle(isExpanded ? "隐藏思考过程" : "显示思考过程", for: .normal)
+        reasoningContainerView.isHidden = !isExpanded
+        reasoningLabel.text = text
+    }
+    
+    private func assistantSegments(for message: Message) -> AssistantSegments {
+        let explicitReasoning = message.reasoningContent?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasExplicitReasoning = !(explicitReasoning?.isEmpty ?? true)
+        
+        if hasExplicitReasoning {
+            let response = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
+            return AssistantSegments(
+                responseText: response.isEmpty ? "..." : response,
+                reasoningText: explicitReasoning
+            )
+        }
+        
+        let content = message.content
+        if let startRange = content.range(of: "<think>") {
+            if let endRange = content.range(of: "</think>"), startRange.lowerBound < endRange.lowerBound {
+                let reasoning = String(content[startRange.upperBound..<endRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+                let response = content.replacingCharacters(in: startRange.lowerBound..<endRange.upperBound, with: "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                return AssistantSegments(
+                    responseText: response.isEmpty ? "..." : response,
+                    reasoningText: reasoning.isEmpty ? nil : reasoning
+                )
+            } else {
+                let reasoning = String(content[startRange.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+                let prefix = String(content[..<startRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+                return AssistantSegments(
+                    responseText: prefix.isEmpty ? "..." : prefix,
+                    reasoningText: reasoning.isEmpty ? nil : reasoning
+                )
             }
         }
+        
+        let cleaned = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        return AssistantSegments(
+            responseText: cleaned.isEmpty ? "..." : cleaned,
+            reasoningText: nil
+        )
+    }
+}
 
-        return nil
+private extension MessageCell {
+    struct AssistantSegments {
+        let responseText: String
+        let reasoningText: String?
     }
 }

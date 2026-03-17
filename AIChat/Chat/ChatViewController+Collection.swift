@@ -13,16 +13,19 @@ extension ChatViewController {
 
             if let message = self?.viewModel.message(id: id) {
                 cell.configure(with: message)
+                cell.onToggleReasoning = { [weak self] in
+                    self?.toggleReasoning(for: id)
+                }
             }
             return cell
         }
     }
 
-    func applySnapshot() {
+    func applySnapshot(animatingDifferences: Bool = true) {
         var snapshot = NSDiffableDataSourceSnapshot<Section, UUID>()
         snapshot.appendSections([.main])
         snapshot.appendItems(viewModel.messages.map(\.id), toSection: .main)
-        dataSource.apply(snapshot, animatingDifferences: true)
+        dataSource.apply(snapshot, animatingDifferences: animatingDifferences)
     }
 
     func appendMessage(_ message: Message, scrollToBottom: Bool = false) {
@@ -49,6 +52,13 @@ extension ChatViewController {
         snapshot.reconfigureItems([id])
         dataSource.apply(snapshot, animatingDifferences: animated)
     }
+    
+    func reloadConversationMessages() {
+        applySnapshot(animatingDifferences: false)
+        viewModel.pruneHeightCache()
+        collectionView.reloadData()
+        updateScrollToBottomButtonVisibility()
+    }
 
     /// Refreshes one message row and optionally keeps viewport pinned to bottom.
     func updateMessageUI(id: UUID, shouldPinToBottom: Bool) {
@@ -62,6 +72,12 @@ extension ChatViewController {
         DispatchQueue.main.async { [weak self] in
             self?.scrollToBottom(animated: true)
         }
+    }
+    
+    func toggleReasoning(for id: UUID) {
+        guard viewModel.toggleReasoning(for: id) else { return }
+        updateMessageUI(id: id, shouldPinToBottom: false)
+        viewModel.save()
     }
 }
 

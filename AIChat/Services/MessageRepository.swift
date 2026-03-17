@@ -1,22 +1,38 @@
 import Foundation
 
-protocol MessageRepository {
-    func loadInitialMessages() -> [Message]
+protocol ConversationRepository {
+    func loadConversations() -> [Conversation]
+    func saveConversations(_ conversations: [Conversation])
 }
 
-struct MockMessageRepository: MessageRepository {
-    func loadInitialMessages() -> [Message] {
-        [
-            Message(role: .user, content: "Hello"),
-            Message(role: .assistant, content: "Hi! This is a static chat cell."),
-            Message(role: .user, content: "Hello2"),
-            Message(role: .user, content: "Hello3"),
-            Message(role: .assistant, content: "Hi! This is a static chat cell2.Hi! This is a static chat cell2.Hi! This is a static chat cell2.Hi! This is a static chat cell2.Hi! This is a static chat cell2.Hi! This is a static chat cell2."),
-            Message(role: .user, content: "Hello4"),
-            Message(role: .user, content: "Hello5"),
-            Message(role: .assistant, content: "Hi! This is a static chat cell3."),
-            Message(role: .user, content: "Hello"),
-            Message(role: .assistant, content: "Hi! This is a static chat cell4.")
-        ]
+struct LocalConversationRepository: ConversationRepository {
+    private let defaults: UserDefaults
+    private let key: String
+    private let encoder = JSONEncoder()
+    private let decoder = JSONDecoder()
+
+    init(
+        defaults: UserDefaults = .standard,
+        key: String = "ai-chat.conversations.v1"
+    ) {
+        self.defaults = defaults
+        self.key = key
+    }
+
+    func loadConversations() -> [Conversation] {
+        guard let data = defaults.data(forKey: key),
+              let conversations = try? decoder.decode([Conversation].self, from: data) else {
+            return [Conversation()]
+        }
+
+        if conversations.isEmpty {
+            return [Conversation()]
+        }
+        return conversations.sorted { $0.updatedAt > $1.updatedAt }
+    }
+
+    func saveConversations(_ conversations: [Conversation]) {
+        guard let data = try? encoder.encode(conversations) else { return }
+        defaults.set(data, forKey: key)
     }
 }

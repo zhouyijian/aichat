@@ -10,16 +10,28 @@ import LDSwiftEventSource
 
 private struct OpenAICompatStreamChunk: Decodable {
     struct Choice: Decodable {
-        struct Delta: Decodable {
+        struct MessageDelta: Decodable {
             let content: String?
+            let reasoningContent: String?
+            let reasoning: String?
+
+            private enum CodingKeys: String, CodingKey {
+                case content
+                case reasoningContent = "reasoning_content"
+                case reasoning
+            }
         }
 
-        let delta: Delta
+        let delta: MessageDelta?
+        let message: MessageDelta?
         let finishReason: String?
+        let text: String?
 
         private enum CodingKeys: String, CodingKey {
             case delta
+            case message
             case finishReason = "finish_reason"
+            case text
         }
     }
 
@@ -46,9 +58,9 @@ final class OpenAIEventSourceClient {
     }
 
     /// 注意：EventSource.stop() 后不能再 restart（所以每次 stream 都 new 一个 EventSource）
-    func startStream(prompt: String,
-                     model: String = "MiniMax-M2.5",
-                     onDelta: @escaping (String) -> Void,
+    func startStream(messages: [[String: String]],
+                     model: String = "MiniMax-M2",
+                     onDelta: @escaping (_ content: String?, _ reasoning: String?) -> Void,
                      onDone: @escaping () -> Void,
                      onError: @escaping (Error) -> Void) {
 
@@ -61,13 +73,7 @@ final class OpenAIEventSourceClient {
         let bodyObj: [String: Any] = [
             "model": model,
             "stream": true,
-            "messages": [
-                [
-                    "role": "system",
-                    "content": "请始终使用简体中文输出，包括思考过程"
-                ],
-                ["role": "user", "content": prompt]
-            ]
+            "messages": messages
         ]
         let body = try? JSONSerialization.data(withJSONObject: bodyObj)
 
@@ -101,12 +107,12 @@ final class OpenAIEventSourceClient {
 
 private final class Handler: EventHandler {
 
-    private let onDelta: (String) -> Void
+    private let onDelta: (_ content: String?, _ reasoning: String?) -> Void
     private let onDone: () -> Void
     private let onErrorCb: (Error) -> Void
     private var streamFinished = false
 
-    init(onDelta: @escaping (String) -> Void,
+    init(onDelta: @escaping (_ content: String?, _ reasoning: String?) -> Void,
          onDone: @escaping () -> Void,
          onError: @escaping (Error) -> Void) {
         self.onDelta = onDelta
@@ -154,8 +160,16 @@ private final class Handler: EventHandler {
         // 再处理 chat.completions stream chunk
         if let chunk = try? JSONDecoder().decode(OpenAICompatStreamChunk.self, from: data),
            let first = chunk.choices.first {
-            if let text = first.delta.content, !text.isEmpty {
-                onDelta(text)
+            let delta = first.delta ?? first.message
+
+            if let reasoning = (delta?.reasoningContent ?? delta?.reasoning), !reasoning.isEmpty {
+                onDelta(nil, reasoning)
+            }
+
+            if let text = delta?.content, !text.isEmpty {
+                onDelta(text, nil)
+            } else if let text = first.text, !text.isEmpty {
+                onDelta(text, nil)
             }
 
             if first.finishReason != nil {
