@@ -16,6 +16,14 @@ final class MessageCell: UICollectionViewCell {
     private var trailingAlignmentConstraint: Constraint?
     private var centerAlignmentConstraint: Constraint?
     
+    private var currentRole: Role?
+    private var currentReasoningExpanded: Bool?
+    private var currentHasReasoning: Bool?
+    
+    private var currentMessageText: String?
+    private var currentReasoningText: String?
+    private var currentReasoningButtonTitle: String?
+    
     override init(frame: CGRect) {
         super.init(frame: frame)
         setupUI()
@@ -77,34 +85,79 @@ final class MessageCell: UICollectionViewCell {
         }
     }
     
-    func configure(with message: Message) {
-        updateAlignment(for: message.role)
-        
+    func configure(with message: Message, assistantSegments: AssistantSegments?) {
         switch message.role {
         case .user:
-            bubbleView.backgroundColor = .systemBlue
-            messageLabel.textColor = .white
-            messageLabel.text = message.content
-            hideReasoning()
+            configureUser(message)
         case .assistant:
-            bubbleView.backgroundColor = .secondarySystemBackground
-            messageLabel.textColor = .label
-            let segments = assistantSegments(for: message)
-            messageLabel.text = segments.responseText
-            applyReasoning(segments.reasoningText, isExpanded: message.isReasoningExpanded)
+            configureAssistant(message, segments: assistantSegments)
         case .system:
-            bubbleView.backgroundColor = .systemGray5
-            messageLabel.textColor = .secondaryLabel
-            messageLabel.text = message.content
-            hideReasoning()
+            configureSystem(message)
         }
     }
+    
+    private func configureUser(_ message: Message) {
+        updateAlignmentIfNeeded(for: .user)
+        applyBubbleStyleIfNeeded(
+            backgroundColor: .systemBlue,
+            textColor: .white
+        )
+        
+        let text = message.content
+        if currentMessageText != text {
+            messageLabel.text = text
+            currentMessageText = text
+        }
+        
+        hideReasoningIfNeeded()
+    }
+    
+    private func configureAssistant(_ message: Message, segments: AssistantSegments?) {
+        updateAlignmentIfNeeded(for: .assistant)
+        applyBubbleStyleIfNeeded(
+            backgroundColor: .secondarySystemBackground,
+            textColor: .label
+        )
 
-    private func updateAlignment(for role: Role) {
+        let finalSegments = segments ?? AssistantSegments(
+            responseText: message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "..." : message.content,
+            reasoningText: nil
+        )
+
+        updateAssistantContent(
+            responseText: finalSegments.responseText,
+            reasoningText: finalSegments.reasoningText
+        )
+
+        updateAssistantStructure(
+            hasReasoning: !(finalSegments.reasoningText?.isEmpty ?? true),
+            isExpanded: message.isReasoningExpanded
+        )
+    }
+    
+    private func configureSystem(_ message: Message) {
+        updateAlignmentIfNeeded(for: .system)
+        applyBubbleStyleIfNeeded(
+            backgroundColor: .systemGray5,
+            textColor: .secondaryLabel
+        )
+        
+        let text = message.content
+        if currentMessageText != text {
+            messageLabel.text = text
+            currentMessageText = text
+        }
+        
+        hideReasoningIfNeeded()
+    }
+    
+    private func updateAlignmentIfNeeded(for role: Role) {
+        guard currentRole != role else { return }
+        
         leadingAlignmentConstraint?.deactivate()
         trailingAlignmentConstraint?.deactivate()
         centerAlignmentConstraint?.deactivate()
-
+        
         switch role {
         case .user:
             trailingAlignmentConstraint?.activate()
@@ -113,35 +166,52 @@ final class MessageCell: UICollectionViewCell {
         case .system:
             centerAlignmentConstraint?.activate()
         }
+        
+        currentRole = role
     }
     
     override func prepareForReuse() {
         super.prepareForReuse()
+        
         messageLabel.text = nil
         reasoningLabel.text = nil
+        toggleReasoningButton.setTitle(nil, for: .normal)
         onToggleReasoning = nil
+        
+        currentRole = nil
+        currentReasoningExpanded = nil
+        currentHasReasoning = nil
+        currentMessageText = nil
+        currentReasoningText = nil
+        currentReasoningButtonTitle = nil
+        
+        toggleReasoningButton.isHidden = true
+        reasoningContainerView.isHidden = true
     }
     
     @objc
     private func didTapToggleReasoning() {
         onToggleReasoning?()
     }
-
-    private func hideReasoning() {
-        toggleReasoningButton.isHidden = true
-        reasoningContainerView.isHidden = true
-    }
     
-    private func applyReasoning(_ text: String?, isExpanded: Bool) {
-        guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            hideReasoning()
-            return
+    private func hideReasoningIfNeeded() {
+        if currentHasReasoning != false || toggleReasoningButton.isHidden == false {
+            toggleReasoningButton.isHidden = true
+        }
+        if reasoningContainerView.isHidden == false {
+            reasoningContainerView.isHidden = true
+        }
+        if currentReasoningText != nil {
+            reasoningLabel.text = nil
+            currentReasoningText = nil
+        }
+        if currentReasoningButtonTitle != nil {
+            toggleReasoningButton.setTitle(nil, for: .normal)
+            currentReasoningButtonTitle = nil
         }
         
-        toggleReasoningButton.isHidden = false
-        toggleReasoningButton.setTitle(isExpanded ? "隐藏思考过程" : "显示思考过程", for: .normal)
-        reasoningContainerView.isHidden = !isExpanded
-        reasoningLabel.text = text
+        currentHasReasoning = false
+        currentReasoningExpanded = nil
     }
     
     private func assistantSegments(for message: Message) -> AssistantSegments {
@@ -159,7 +229,8 @@ final class MessageCell: UICollectionViewCell {
         let content = message.content
         if let startRange = content.range(of: "<think>") {
             if let endRange = content.range(of: "</think>"), startRange.lowerBound < endRange.lowerBound {
-                let reasoning = String(content[startRange.upperBound..<endRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+                let reasoning = String(content[startRange.upperBound..<endRange.lowerBound])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
                 let response = content.replacingCharacters(in: startRange.lowerBound..<endRange.upperBound, with: "")
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 return AssistantSegments(
@@ -167,8 +238,10 @@ final class MessageCell: UICollectionViewCell {
                     reasoningText: reasoning.isEmpty ? nil : reasoning
                 )
             } else {
-                let reasoning = String(content[startRange.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
-                let prefix = String(content[..<startRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+                let reasoning = String(content[startRange.upperBound...])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let prefix = String(content[..<startRange.lowerBound])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
                 return AssistantSegments(
                     responseText: prefix.isEmpty ? "..." : prefix,
                     reasoningText: reasoning.isEmpty ? nil : reasoning
@@ -182,11 +255,61 @@ final class MessageCell: UICollectionViewCell {
             reasoningText: nil
         )
     }
+    
+    // MARK: - 内容更新（高频）
+    private func updateAssistantContent(responseText: String, reasoningText: String?) {
+        if currentMessageText != responseText {
+            messageLabel.text = responseText
+            currentMessageText = responseText
+        }
+        
+        if currentReasoningText != reasoningText {
+            reasoningLabel.text = reasoningText
+            currentReasoningText = reasoningText
+        }
+    }
+    
+    
+    // MARK: - 结构更新（低频）
+    private func updateAssistantStructure(hasReasoning: Bool, isExpanded: Bool) {
+        let hasReasoningChanged = currentHasReasoning != hasReasoning
+        let expandedChanged = currentReasoningExpanded != isExpanded
+        
+        if hasReasoningChanged {
+            toggleReasoningButton.isHidden = !hasReasoning
+        }
+        
+        let shouldHideReasoningContainer = !hasReasoning || !isExpanded
+        if hasReasoningChanged || expandedChanged {
+            reasoningContainerView.isHidden = shouldHideReasoningContainer
+        }
+        
+        if hasReasoning {
+            let title = isExpanded ? "隐藏思考过程" : "显示思考过程"
+            if currentReasoningButtonTitle != title {
+                toggleReasoningButton.setTitle(title, for: .normal)
+                currentReasoningButtonTitle = title
+            }
+        } else {
+            if currentReasoningButtonTitle != nil {
+                toggleReasoningButton.setTitle(nil, for: .normal)
+                currentReasoningButtonTitle = nil
+            }
+        }
+        
+        currentHasReasoning = hasReasoning
+        currentReasoningExpanded = isExpanded
+    }
+    
+    private func applyBubbleStyleIfNeeded(backgroundColor: UIColor, textColor: UIColor) {
+        if bubbleView.backgroundColor != backgroundColor {
+            bubbleView.backgroundColor = backgroundColor
+        }
+        if messageLabel.textColor != textColor {
+            messageLabel.textColor = textColor
+        }
+    }
+    
 }
 
-private extension MessageCell {
-    struct AssistantSegments {
-        let responseText: String
-        let reasoningText: String?
-    }
-}
+

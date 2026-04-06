@@ -10,12 +10,13 @@ extension ChatViewController {
                 withReuseIdentifier: MessageCell.reuseID,
                 for: indexPath
             ) as! MessageCell
-
-            if let message = self?.viewModel.message(id: id) {
-                cell.configure(with: message)
-                cell.onToggleReasoning = { [weak self] in
-                    self?.toggleReasoning(for: id)
-                }
+            guard let self, let message = self.viewModel.message(id: id) else {
+                return cell
+            }
+            let segments = message.role == .assistant ? self.viewModel.assistantSegments(for: message) : nil
+            cell.configure(with: message, assistantSegments: segments)
+            cell.onToggleReasoning = { [weak self] in
+                self?.toggleReasoning(for: id)
             }
             return cell
         }
@@ -101,7 +102,8 @@ extension ChatViewController {
         }
 
         sizingCell.frame = CGRect(x: 0, y: 0, width: width, height: 1000)
-        sizingCell.configure(with: message)
+        let assistantSegments = message.role == .assistant ? viewModel.assistantSegments(for: message) : nil
+        sizingCell.configure(with: message, assistantSegments: assistantSegments)
         sizingCell.layoutIfNeeded()
 
         let target = CGSize(width: width, height: UIView.layoutFittingCompressedSize.height)

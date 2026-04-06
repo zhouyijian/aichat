@@ -1,5 +1,16 @@
 import UIKit
 
+struct AssistantSegments {
+    let responseText: String
+    let reasoningText: String?
+}
+
+private struct AssistantSegmentsCacheEntry {
+    let rawContent: String
+    let rawReasoningContent: String?
+    let segments: AssistantSegments
+}
+
 final class ChatViewModel {
 
     // MARK: - State
@@ -7,6 +18,7 @@ final class ChatViewModel {
     private(set) var currentConversationID: UUID
     private let repository: ConversationRepository
     private let heightCache: MessageHeightCache
+    private var assistantSegmentsCache: [UUID: AssistantSegmentsCacheEntry] = [:]
     
     var messages: [Message] {
         currentConversation?.messages ?? []
@@ -61,6 +73,7 @@ extension ChatViewModel {
         conversations.insert(conversation, at: 0)
         currentConversationID = conversation.id
         invalidateAllHeights()
+        pruneAssistantSegmentsCache()
         save()
         return conversation
     }
@@ -70,6 +83,7 @@ extension ChatViewModel {
         guard conversations.contains(where: { $0.id == id }) else { return false }
         currentConversationID = id
         invalidateAllHeights()
+        pruneAssistantSegmentsCache()
         return true
     }
     
@@ -90,6 +104,22 @@ extension ChatViewModel {
     func save() {
         repository.saveConversations(conversations)
     }
+    
+    func assistantSegments(for message: Message) -> AssistantSegments {
+        if let cached = assistantSegmentsCache[message.id],
+           cached.rawContent == message.content,
+           cached.rawReasoningContent == message.reasoningContent {
+            return cached.segments
+        }
+
+        let segments = buildAssistantSegments(from: message)
+        assistantSegmentsCache[message.id] = AssistantSegmentsCacheEntry(
+            rawContent: message.content,
+            rawReasoningContent: message.reasoningContent,
+            segments: segments
+        )
+        return segments
+    }
 }
 
 // MARK: - Message Mutation
@@ -101,36 +131,50 @@ extension ChatViewModel {
                 conversation.title = makeTitle(from: message.content)
             }
         }
+        refreshAssistantSegmentsIfNeeded(for: message)
     }
 
     /// Applies in-place mutation to an existing message by id.
     /// - Returns: true if target message exists and is updated.
     @discardableResult
-    func updateMessage(id: UUID, persist: Bool = false, mutate: (inout Message) -> Void) -> Bool {
-        var updated = false
+    func updateMessage(
+        id: UUID,
+        persist: Bool = false,
+        affectsAssistantSegments: Bool = false,
+        mutate: (inout Message) -> Void
+    ) -> Bool {
+        var updatedMessage: Message?
+
         mutateCurrentConversation(persist: persist, touchUpdatedAt: persist) { conversation in
             guard let idx = conversation.messages.firstIndex(where: { $0.id == id }) else { return }
             mutate(&conversation.messages[idx])
-            updated = true
+            updatedMessage = conversation.messages[idx]
         }
-        return updated
+
+        guard let updatedMessage else { return false }
+
+        if affectsAssistantSegments {
+            refreshAssistantSegmentsIfNeeded(for: updatedMessage)
+        }
+
+        return true
     }
     
     func appendContent(to id: UUID, delta: String, persist: Bool = false) {
-        _ = updateMessage(id: id, persist: persist) { message in
+        _ = updateMessage(id: id, persist: persist, affectsAssistantSegments: true) { message in
             message.content += delta
         }
     }
 
     func appendReasoning(to id: UUID, delta: String, persist: Bool = false) {
-        _ = updateMessage(id: id, persist: persist) { message in
+        _ = updateMessage(id: id, persist: persist, affectsAssistantSegments: true) { message in
             let current = message.reasoningContent ?? ""
             message.reasoningContent = current + delta
         }
     }
     
     func setContent(for id: UUID, text: String, persist: Bool = true) {
-        _ = updateMessage(id: id, persist: persist) { message in
+        _ = updateMessage(id: id, persist: persist, affectsAssistantSegments: true) { message in
             message.content = text
         }
     }
@@ -170,6 +214,11 @@ extension ChatViewModel {
     func pruneHeightCache() {
         let validIDs = Set(messages.map(\.id))
         heightCache.prune(validMessageIDs: validIDs)
+    }
+    
+    func pruneAssistantSegmentsCache() {
+        let validIDs = Set(messages.map(\.id))
+        assistantSegmentsCache = assistantSegmentsCache.filter { validIDs.contains($0.key) }
     }
 }
 
@@ -243,6 +292,70 @@ private extension String {
             of: "<think>[\\s\\S]*?</think>",
             with: "",
             options: .regularExpression
+        )
+    }
+}
+
+private extension ChatViewModel {
+    func refreshAssistantSegmentsIfNeeded(for message: Message) {
+        guard message.role == .assistant else {
+            assistantSegmentsCache.removeValue(forKey: message.id)
+            return
+        }
+
+        let segments = buildAssistantSegments(from: message)
+        assistantSegmentsCache[message.id] = AssistantSegmentsCacheEntry(
+            rawContent: message.content,
+            rawReasoningContent: message.reasoningContent,
+            segments: segments
+        )
+    }
+    
+    func buildAssistantSegments(from message: Message) -> AssistantSegments {
+        let explicitReasoning = message.reasoningContent?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasExplicitReasoning = !(explicitReasoning?.isEmpty ?? true)
+
+        if hasExplicitReasoning {
+            let response = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
+            return AssistantSegments(
+                responseText: response.isEmpty ? "..." : response,
+                reasoningText: explicitReasoning
+            )
+        }
+
+        let content = message.content
+        if let startRange = content.range(of: "<think>") {
+            if let endRange = content.range(of: "</think>"),
+               startRange.lowerBound < endRange.lowerBound {
+                let reasoning = String(content[startRange.upperBound..<endRange.lowerBound])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let response = content.replacingCharacters(
+                    in: startRange.lowerBound..<endRange.upperBound,
+                    with: ""
+                )
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+
+                return AssistantSegments(
+                    responseText: response.isEmpty ? "..." : response,
+                    reasoningText: reasoning.isEmpty ? nil : reasoning
+                )
+            } else {
+                let reasoning = String(content[startRange.upperBound...])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let prefix = String(content[..<startRange.lowerBound])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+
+                return AssistantSegments(
+                    responseText: prefix.isEmpty ? "..." : prefix,
+                    reasoningText: reasoning.isEmpty ? nil : reasoning
+                )
+            }
+        }
+
+        let cleaned = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        return AssistantSegments(
+            responseText: cleaned.isEmpty ? "..." : cleaned,
+            reasoningText: nil
         )
     }
 }
