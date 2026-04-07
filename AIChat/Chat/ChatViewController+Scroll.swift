@@ -3,7 +3,7 @@ import UIKit
 // MARK: - Bottom Scroll Button
 extension ChatViewController {
     @objc func didTapScrollToBottom() {
-        scrollToBottom(animated: true)
+        scrollToBottomByItem(animated: true)
         updateScrollToBottomButtonVisibility()
     }
 
@@ -11,19 +11,24 @@ extension ChatViewController {
         scrollToBottomButton.isHidden = isNearBottom(tolerance: 450)
     }
 
-    func isNearBottom(tolerance: CGFloat = 60) -> Bool {
-        let contentHeight = collectionView.contentSize.height
-        let visibleHeight = collectionView.bounds.height - collectionView.adjustedContentInset.top - collectionView.adjustedContentInset.bottom
-        let y = collectionView.contentOffset.y + collectionView.adjustedContentInset.top
-        let maxOffsetY = max(0, contentHeight - visibleHeight)
-        return (maxOffsetY - y) <= tolerance
-    }
+    func isNearBottom(tolerance: CGFloat = 120) -> Bool {
+        let adjustedInsets = collectionView.adjustedContentInset
+        let visibleHeight = collectionView.bounds.height - adjustedInsets.top - adjustedInsets.bottom
+        let currentOffsetY = collectionView.contentOffset.y + adjustedInsets.top
+        let maxOffsetY = max(0, collectionView.contentSize.height - visibleHeight)
 
-    func scrollToBottom(animated: Bool) {
+        return (maxOffsetY - currentOffsetY) <= tolerance
+    }
+    
+    func scrollToBottomByItem(animated: Bool = false) {
         let lastItem = viewModel.messages.count - 1
         guard lastItem >= 0 else { return }
-        collectionView.scrollToItem(at: IndexPath(item: lastItem, section: 0), at: .bottom, animated: animated)
+
+        let indexPath = IndexPath(item: lastItem, section: 0)
+        collectionView.scrollToItem(at: indexPath, at: .bottom, animated: animated)
+        updateScrollToBottomButtonVisibility()
     }
+    
 }
 
 // MARK: - UIScrollViewDelegate

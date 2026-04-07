@@ -56,6 +56,10 @@ final class ChatViewController: UIViewController {
     var userIsInteracting = false
     private var isStreaming = false
 
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
     // MARK: - Lifecycle
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -64,16 +68,24 @@ final class ChatViewController: UIViewController {
         setupNavigationItems()
         setupInputComposer()
         setupCollectionView()
+        setupDismissKeyboardGesture()
         setupDataSource()
         setupScrollToBottomButton()
         view.layoutIfNeeded()
         adjustInputHeightIfNeeded()
         applySnapshot(animatingDifferences: false)
         registerTraitObservers()
+        registerKeyboardObservers()
         updateConversationTitle()
         updateSendButtonState()
     }
+    
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        scrollToBottomByItem(animated: false)
+    }
 
+    private var lastAppliedInputContainerHeight: CGFloat = 0
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         adjustInputHeightIfNeeded()
@@ -95,7 +107,40 @@ final class ChatViewController: UIViewController {
             self.updateScrollToBottomButtonVisibility()
         }
     }
+    
+    private func registerKeyboardObservers() {
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleKeyboardWillChangeFrame(_:)),
+            name: UIResponder.keyboardWillChangeFrameNotification,
+            object: nil
+        )
+    }
+    
+    @objc private func handleKeyboardWillChangeFrame(_ notification: Notification) {
+        guard
+            let userInfo = notification.userInfo,
+            let duration = userInfo[UIResponder.keyboardAnimationDurationUserInfoKey] as? TimeInterval,
+            let curveRawValue = userInfo[UIResponder.keyboardAnimationCurveUserInfoKey] as? UInt
+        else {
+            return
+        }
 
+        let options = UIView.AnimationOptions(rawValue: curveRawValue << 16)
+
+        // 只在接近底部时自动跟随，避免打断用户看历史消息
+        let shouldStickToBottom = isNearBottom(tolerance: 500)
+
+        UIView.animate(withDuration: duration, delay: 0, options: options) { [weak self] in
+            guard let self else { return }
+            self.view.layoutIfNeeded()
+            
+            if shouldStickToBottom {
+                self.scrollToBottomByItem(animated: false)
+            }
+        }
+    }
+    
     private func startOpenAIStream(history: [[String: String]], assistantID: UUID) {
         openAI.startStream(
             messages: history,
@@ -198,7 +243,7 @@ final class ChatViewController: UIViewController {
     private func startNewConversation() {
         stopCurrentStream(flushPending: false)
         _ = viewModel.startNewConversation()
-        reloadConversationMessages()
+        reloadConversationMessages(scrollToBottom: true)
         updateConversationTitle()
         inputTextView.text = ""
         adjustInputHeightIfNeeded()
@@ -208,7 +253,7 @@ final class ChatViewController: UIViewController {
     private func switchConversation(to id: UUID) {
         stopCurrentStream(flushPending: false)
         guard viewModel.selectConversation(id: id) else { return }
-        reloadConversationMessages()
+        reloadConversationMessages(scrollToBottom: true)
         updateConversationTitle()
     }
 }
@@ -238,7 +283,8 @@ extension ChatViewController {
             action: #selector(didTapCreateConversation)
         )
     }
-
+    
+    
     func setupCollectionView() {
         let layout = UICollectionViewFlowLayout()
         layout.scrollDirection = .vertical
@@ -250,7 +296,6 @@ extension ChatViewController {
         collectionView = UICollectionView(frame: .zero, collectionViewLayout: layout)
         collectionView.backgroundColor = .clear
         collectionView.alwaysBounceVertical = true
-        collectionView.keyboardDismissMode = .interactive
         collectionView.delegate = self
 
         collectionView.register(MessageCell.self, forCellWithReuseIdentifier: MessageCell.reuseID)
@@ -260,6 +305,19 @@ extension ChatViewController {
             make.top.leading.trailing.equalToSuperview()
             make.bottom.equalTo(inputContainerView.snp.top)
         }
+    }
+    
+    private func setupDismissKeyboardGesture() {
+        let tap = UITapGestureRecognizer(target: self, action: #selector(dismissKeyboardTap(_:)))
+        tap.cancelsTouchesInView = false
+        tap.delaysTouchesBegan = false
+        tap.delaysTouchesEnded = false
+        tap.delegate = self
+        collectionView.addGestureRecognizer(tap)
+    }
+
+    @objc private func dismissKeyboardTap(_ gesture: UITapGestureRecognizer) {
+        view.endEditing(true)
     }
 
     func setupInputComposer() {
@@ -382,6 +440,41 @@ extension ChatViewController: UITextViewDelegate {
     func textViewDidChange(_ textView: UITextView) {
         adjustInputHeightIfNeeded()
         updateSendButtonState()
+    }
+}
+
+extension ChatViewController: UIGestureRecognizerDelegate {
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        guard let touchedView = touch.view else { return true }
+
+        // 输入区域不收
+        if touchedView.isDescendant(of: inputContainerView) {
+            return false
+        }
+
+        // 点到 UIControl（按钮等）不收
+        if touchedView is UIControl {
+            return false
+        }
+
+        return true
+    }
+}
+
+extension ChatViewController {
+    func reloadConversationMessages(scrollToBottom: Bool) {
+        applySnapshot(animatingDifferences: false)
+        viewModel.pruneHeightCache()
+        collectionView.reloadData()
+        collectionView.layoutIfNeeded()
+
+        if scrollToBottom {
+            DispatchQueue.main.async { [weak self] in
+                self?.scrollToBottomByItem(animated: false)
+            }
+        }
+
+        updateScrollToBottomButtonVisibility()
     }
 }
 

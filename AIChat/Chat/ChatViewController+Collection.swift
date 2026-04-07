@@ -44,7 +44,7 @@ extension ChatViewController {
 
         guard scrollToBottom else { return }
         DispatchQueue.main.async { [weak self] in
-            self?.scrollToBottom(animated: true)
+            self?.scrollToBottomByItem(animated: true)
         }
     }
 
@@ -71,7 +71,7 @@ extension ChatViewController {
 
         guard shouldPinToBottom else { return }
         DispatchQueue.main.async { [weak self] in
-            self?.scrollToBottom(animated: true)
+            self?.scrollToBottomByItem(animated: false)
         }
     }
     
@@ -93,6 +93,7 @@ extension ChatViewController {
 
     func measureHeight(for message: Message, width: CGFloat) -> CGFloat {
         let displayScale = collectionView.traitCollection.displayScale
+
         if let cachedHeight = viewModel.cachedHeight(
             for: message.id,
             width: width,
@@ -101,6 +102,136 @@ extension ChatViewController {
             return cachedHeight
         }
 
+        let measuredHeight: CGFloat
+        if shouldUseFastMeasure(for: message) {
+            measuredHeight = fastMeasureHeight(for: message, width: width)
+        } else {
+            measuredHeight = exactMeasureHeight(for: message, width: width)
+        }
+
+        viewModel.cacheHeight(
+            measuredHeight,
+            for: message.id,
+            width: width,
+            displayScale: displayScale
+        )
+        return measuredHeight
+    }
+    
+    private func shouldUseFastMeasure(for message: Message) -> Bool {
+        guard message.role == .assistant else { return false }
+
+        let segments = viewModel.assistantSegments(for: message)
+        let totalLength = segments.responseText.count + (segments.reasoningText?.count ?? 0)
+
+        return isActivelyStreaming(message) || totalLength > 200
+    }
+    
+    private func isActivelyStreaming(_ message: Message) -> Bool {
+        switch message.status {
+        // 按你的实际枚举调整
+        case .streaming, .pending:
+            return true
+        default:
+            return false
+        }
+    }
+    
+    private func fastMeasureHeight(for message: Message, width: CGFloat) -> CGFloat {
+        let bubbleWidth = floor(width * 0.82)
+
+        // bubble 内 stackView 左右 inset
+        let stackHorizontalInsets: CGFloat = 12 * 2
+        let stackVerticalInsets: CGFloat = 12 * 2
+
+        // cell 外层 bubble 上下 inset
+        let outerVerticalInsets: CGFloat = 6 * 2
+
+        let stackSpacing: CGFloat = 8
+
+        let messageFont = UIFont.systemFont(ofSize: 16)
+        let reasoningFont = UIFont.systemFont(ofSize: 13)
+        let buttonFont = UIFont.systemFont(ofSize: 13, weight: .medium)
+
+        let segments = message.role == .assistant ? viewModel.assistantSegments(for: message) : nil
+
+        let textWidth = max(0, bubbleWidth - stackHorizontalInsets)
+
+        var arrangedHeights: [CGFloat] = []
+
+        switch message.role {
+        case .user, .system:
+            let text = normalizedMainText(for: message, segments: segments)
+            let messageHeight = textHeight(text: text, font: messageFont, width: textWidth)
+            arrangedHeights.append(messageHeight)
+
+        case .assistant:
+            let responseText = segments?.responseText ?? fallbackResponseText(for: message)
+            let responseHeight = textHeight(text: responseText, font: messageFont, width: textWidth)
+            arrangedHeights.append(responseHeight)
+
+            let reasoningText = segments?.reasoningText
+            let hasReasoning = !(reasoningText?.isEmpty ?? true)
+
+            if hasReasoning {
+                let buttonHeight = max(ceil(buttonFont.lineHeight), 20)
+                arrangedHeights.append(buttonHeight)
+
+                if message.isReasoningExpanded, let reasoningText, !reasoningText.isEmpty {
+                    // reasoningLabel 在 reasoningContainerView 内还有 10 + 10 的左右 inset
+                    let reasoningTextWidth = max(0, textWidth - 20)
+                    let reasoningTextHeight = textHeight(
+                        text: reasoningText,
+                        font: reasoningFont,
+                        width: reasoningTextWidth
+                    )
+
+                    // reasoningContainerView 高度 = reasoningLabel 高度 + 上下 10 + 10
+                    let reasoningContainerHeight = reasoningTextHeight + 20
+                    arrangedHeights.append(reasoningContainerHeight)
+                }
+            }
+        }
+
+        let arrangedContentHeight = arrangedHeights.reduce(0, +)
+        let totalSpacing = CGFloat(max(0, arrangedHeights.count - 1)) * stackSpacing
+
+        let totalHeight =
+            outerVerticalInsets +
+            stackVerticalInsets +
+            arrangedContentHeight +
+            totalSpacing
+
+        return ceil(totalHeight)
+    }
+    
+    private func normalizedMainText(for message: Message, segments: AssistantSegments?) -> String {
+        switch message.role {
+        case .assistant:
+            return segments?.responseText ?? fallbackResponseText(for: message)
+        case .user, .system:
+            let text = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
+            return text.isEmpty ? "..." : text
+        }
+    }
+
+    private func fallbackResponseText(for message: Message) -> String {
+        let text = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? "..." : text
+    }
+    
+    private func textHeight(text: String, font: UIFont, width: CGFloat) -> CGFloat {
+        let safeText = text.isEmpty ? " " : text
+        let rect = (safeText as NSString).boundingRect(
+            with: CGSize(width: width, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [.font: font],
+            context: nil
+        )
+        return ceil(rect.height)
+    }
+    
+    private func exactMeasureHeight(for message: Message, width: CGFloat) -> CGFloat {
         sizingCell.frame = CGRect(x: 0, y: 0, width: width, height: 1000)
         let assistantSegments = message.role == .assistant ? viewModel.assistantSegments(for: message) : nil
         sizingCell.configure(with: message, assistantSegments: assistantSegments)
@@ -112,15 +243,7 @@ extension ChatViewController {
             withHorizontalFittingPriority: .required,
             verticalFittingPriority: .fittingSizeLevel
         )
-
-        let measuredHeight = ceil(size.height)
-        viewModel.cacheHeight(
-            measuredHeight,
-            for: message.id,
-            width: width,
-            displayScale: displayScale
-        )
-        return measuredHeight
+        return ceil(size.height)
     }
 }
 

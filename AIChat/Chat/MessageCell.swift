@@ -33,6 +33,25 @@ final class MessageCell: UICollectionViewCell {
         fatalError("init(coder:) has not been implemented")
     }
     
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        
+        messageLabel.text = nil
+        reasoningLabel.text = nil
+        toggleReasoningButton.setTitle(nil, for: .normal)
+        onToggleReasoning = nil
+        
+        currentRole = nil
+        currentReasoningExpanded = nil
+        currentHasReasoning = nil
+        currentMessageText = nil
+        currentReasoningText = nil
+        currentReasoningButtonTitle = nil
+        
+        toggleReasoningButton.isHidden = true
+        reasoningContainerView.isHidden = true
+    }
+    
     private func setupUI() {
         
         contentView.addSubview(bubbleView)
@@ -59,9 +78,10 @@ final class MessageCell: UICollectionViewCell {
         reasoningLabel.font = .systemFont(ofSize: 13)
         reasoningLabel.textColor = .secondaryLabel
         
-        contentStackView.addArrangedSubview(messageLabel)
         contentStackView.addArrangedSubview(toggleReasoningButton)
         contentStackView.addArrangedSubview(reasoningContainerView)
+        contentStackView.addArrangedSubview(messageLabel)
+
         reasoningContainerView.addSubview(reasoningLabel)
         
         bubbleView.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -170,25 +190,6 @@ final class MessageCell: UICollectionViewCell {
         currentRole = role
     }
     
-    override func prepareForReuse() {
-        super.prepareForReuse()
-        
-        messageLabel.text = nil
-        reasoningLabel.text = nil
-        toggleReasoningButton.setTitle(nil, for: .normal)
-        onToggleReasoning = nil
-        
-        currentRole = nil
-        currentReasoningExpanded = nil
-        currentHasReasoning = nil
-        currentMessageText = nil
-        currentReasoningText = nil
-        currentReasoningButtonTitle = nil
-        
-        toggleReasoningButton.isHidden = true
-        reasoningContainerView.isHidden = true
-    }
-    
     @objc
     private func didTapToggleReasoning() {
         onToggleReasoning?()
@@ -212,48 +213,6 @@ final class MessageCell: UICollectionViewCell {
         
         currentHasReasoning = false
         currentReasoningExpanded = nil
-    }
-    
-    private func assistantSegments(for message: Message) -> AssistantSegments {
-        let explicitReasoning = message.reasoningContent?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let hasExplicitReasoning = !(explicitReasoning?.isEmpty ?? true)
-        
-        if hasExplicitReasoning {
-            let response = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
-            return AssistantSegments(
-                responseText: response.isEmpty ? "..." : response,
-                reasoningText: explicitReasoning
-            )
-        }
-        
-        let content = message.content
-        if let startRange = content.range(of: "<think>") {
-            if let endRange = content.range(of: "</think>"), startRange.lowerBound < endRange.lowerBound {
-                let reasoning = String(content[startRange.upperBound..<endRange.lowerBound])
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                let response = content.replacingCharacters(in: startRange.lowerBound..<endRange.upperBound, with: "")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                return AssistantSegments(
-                    responseText: response.isEmpty ? "..." : response,
-                    reasoningText: reasoning.isEmpty ? nil : reasoning
-                )
-            } else {
-                let reasoning = String(content[startRange.upperBound...])
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                let prefix = String(content[..<startRange.lowerBound])
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                return AssistantSegments(
-                    responseText: prefix.isEmpty ? "..." : prefix,
-                    reasoningText: reasoning.isEmpty ? nil : reasoning
-                )
-            }
-        }
-        
-        let cleaned = content.trimmingCharacters(in: .whitespacesAndNewlines)
-        return AssistantSegments(
-            responseText: cleaned.isEmpty ? "..." : cleaned,
-            reasoningText: nil
-        )
     }
     
     // MARK: - 内容更新（高频）
