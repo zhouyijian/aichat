@@ -173,6 +173,7 @@ extension ChatViewModel {
     func appendContent(to id: UUID, delta: String, persist: Bool = false) {
         _ = updateMessage(id: id, persist: persist, affectsAssistantSegments: true) { message in
             message.content += delta
+            message.advanceLayoutVersion()
         }
     }
 
@@ -180,12 +181,14 @@ extension ChatViewModel {
         _ = updateMessage(id: id, persist: persist, affectsAssistantSegments: true) { message in
             let current = message.reasoningContent ?? ""
             message.reasoningContent = current + delta
+            message.advanceLayoutVersion()
         }
     }
     
     func setContent(for id: UUID, text: String, persist: Bool = true) {
         _ = updateMessage(id: id, persist: persist, affectsAssistantSegments: true) { message in
             message.content = text
+            message.advanceLayoutVersion()
         }
     }
     
@@ -193,6 +196,7 @@ extension ChatViewModel {
     func toggleReasoning(for id: UUID) -> Bool {
         updateMessage(id: id, persist: false) { message in
             message.isReasoningExpanded.toggle()
+            message.advanceLayoutVersion()
         }
     }
 
@@ -200,6 +204,7 @@ extension ChatViewModel {
     func toggleContentExpansion(for id: UUID) -> Bool {
         updateMessage(id: id, persist: false) { message in
             message.isContentExpanded.toggle()
+            message.advanceLayoutVersion()
         }
     }
 
@@ -212,16 +217,32 @@ extension ChatViewModel {
 
 // MARK: - Height Cache Operations
 extension ChatViewModel {
-    func cachedHeight(for messageID: UUID, width: CGFloat, displayScale: CGFloat) -> CGFloat? {
-        heightCache.cachedHeight(for: messageID, width: width, displayScale: displayScale)
+    func cachedHeight(for message: Message, width: CGFloat, displayScale: CGFloat) -> CGFloat? {
+        heightCache.cachedHeight(
+            for: message.id,
+            width: width,
+            displayScale: displayScale,
+            layoutVersion: message.layoutVersion
+        )
     }
 
-    func cacheHeight(_ height: CGFloat, for messageID: UUID, width: CGFloat, displayScale: CGFloat) {
-        heightCache.cacheHeight(height, for: messageID, width: width, displayScale: displayScale)
+    func cacheHeight(_ height: CGFloat, for message: Message, width: CGFloat, displayScale: CGFloat) {
+        heightCache.cacheHeight(
+            height,
+            for: message.id,
+            width: width,
+            displayScale: displayScale,
+            layoutVersion: message.layoutVersion
+        )
     }
 
-    func invalidateHeight(for messageID: UUID, width: CGFloat, displayScale: CGFloat) {
-        heightCache.invalidateHeight(for: messageID, width: width, displayScale: displayScale)
+    func invalidateHeight(for message: Message, width: CGFloat, displayScale: CGFloat) {
+        heightCache.invalidateHeight(
+            for: message.id,
+            width: width,
+            displayScale: displayScale,
+            layoutVersion: message.layoutVersion
+        )
     }
 
     func invalidateAllHeights() {

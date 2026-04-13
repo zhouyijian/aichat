@@ -7,6 +7,7 @@ final class MessageHeightCache {
     private struct Key: Hashable {
         let messageID: UUID
         let pixelWidth: Int
+        let layoutVersion: Int
     }
 
     // MARK: - State
@@ -14,19 +15,51 @@ final class MessageHeightCache {
     private var keyIndex: [UUID: Set<Key>] = [:]
 
     // MARK: - Cache Operations
-    func cachedHeight(for messageID: UUID, width: CGFloat, displayScale: CGFloat) -> CGFloat? {
-        let key = makeKey(for: messageID, width: width, displayScale: displayScale)
+    func cachedHeight(
+        for messageID: UUID,
+        width: CGFloat,
+        displayScale: CGFloat,
+        layoutVersion: Int
+    ) -> CGFloat? {
+        let key = makeKey(
+            for: messageID,
+            width: width,
+            displayScale: displayScale,
+            layoutVersion: layoutVersion
+        )
         return heights[key]
     }
 
-    func cacheHeight(_ height: CGFloat, for messageID: UUID, width: CGFloat, displayScale: CGFloat) {
-        let key = makeKey(for: messageID, width: width, displayScale: displayScale)
+    func cacheHeight(
+        _ height: CGFloat,
+        for messageID: UUID,
+        width: CGFloat,
+        displayScale: CGFloat,
+        layoutVersion: Int
+    ) {
+        let key = makeKey(
+            for: messageID,
+            width: width,
+            displayScale: displayScale,
+            layoutVersion: layoutVersion
+        )
+        removeStaleKeysIfNeeded(replacing: key)
         heights[key] = height
         keyIndex[messageID, default: []].insert(key)
     }
 
-    func invalidateHeight(for messageID: UUID, width: CGFloat, displayScale: CGFloat) {
-        let key = makeKey(for: messageID, width: width, displayScale: displayScale)
+    func invalidateHeight(
+        for messageID: UUID,
+        width: CGFloat,
+        displayScale: CGFloat,
+        layoutVersion: Int
+    ) {
+        let key = makeKey(
+            for: messageID,
+            width: width,
+            displayScale: displayScale,
+            layoutVersion: layoutVersion
+        )
         heights.removeValue(forKey: key)
         keyIndex[messageID]?.remove(key)
         if keyIndex[messageID]?.isEmpty == true {
@@ -45,8 +78,36 @@ final class MessageHeightCache {
     }
 
     // MARK: - Helpers
-    private func makeKey(for messageID: UUID, width: CGFloat, displayScale: CGFloat) -> Key {
+    private func makeKey(
+        for messageID: UUID,
+        width: CGFloat,
+        displayScale: CGFloat,
+        layoutVersion: Int
+    ) -> Key {
         let pixelWidth = Int((width * displayScale).rounded())
-        return Key(messageID: messageID, pixelWidth: pixelWidth)
+        return Key(
+            messageID: messageID,
+            pixelWidth: pixelWidth,
+            layoutVersion: layoutVersion
+        )
+    }
+
+    private func removeStaleKeysIfNeeded(replacing key: Key) {
+        guard let existingKeys = keyIndex[key.messageID] else { return }
+
+        let staleKeys = existingKeys.filter {
+            $0.pixelWidth == key.pixelWidth && $0.layoutVersion != key.layoutVersion
+        }
+
+        guard !staleKeys.isEmpty else { return }
+
+        for staleKey in staleKeys {
+            heights.removeValue(forKey: staleKey)
+            keyIndex[key.messageID]?.remove(staleKey)
+        }
+
+        if keyIndex[key.messageID]?.isEmpty == true {
+            keyIndex[key.messageID] = nil
+        }
     }
 }

@@ -25,6 +25,7 @@ nonisolated struct Message: Hashable, Sendable, Codable {
     var reasoningContent: String?
     var isReasoningExpanded: Bool
     var isContentExpanded: Bool
+    var layoutVersion: Int
     let createdAt: Date
     var status: Status
     
@@ -35,6 +36,7 @@ nonisolated struct Message: Hashable, Sendable, Codable {
         reasoningContent: String? = nil,
         isReasoningExpanded: Bool = false,
         isContentExpanded: Bool = false,
+        layoutVersion: Int = 0,
         createdAt: Date = Date(),
         status: Status = .success
     ) {
@@ -44,6 +46,7 @@ nonisolated struct Message: Hashable, Sendable, Codable {
         self.reasoningContent = reasoningContent
         self.isReasoningExpanded = isReasoningExpanded
         self.isContentExpanded = isContentExpanded
+        self.layoutVersion = layoutVersion
         self.createdAt = createdAt
         self.status = status
     }
@@ -65,6 +68,7 @@ nonisolated struct Message: Hashable, Sendable, Codable {
         case reasoningContent
         case isReasoningExpanded
         case isContentExpanded
+        case layoutVersion
         case createdAt
         case status
     }
@@ -77,6 +81,7 @@ nonisolated struct Message: Hashable, Sendable, Codable {
         reasoningContent = try container.decodeIfPresent(String.self, forKey: .reasoningContent)
         isReasoningExpanded = try container.decodeIfPresent(Bool.self, forKey: .isReasoningExpanded) ?? false
         isContentExpanded = try container.decodeIfPresent(Bool.self, forKey: .isContentExpanded) ?? false
+        layoutVersion = try container.decodeIfPresent(Int.self, forKey: .layoutVersion) ?? 0
         createdAt = try container.decode(Date.self, forKey: .createdAt)
         status = try container.decode(Status.self, forKey: .status)
     }
@@ -89,8 +94,13 @@ nonisolated struct Message: Hashable, Sendable, Codable {
         try container.encodeIfPresent(reasoningContent, forKey: .reasoningContent)
         try container.encode(isReasoningExpanded, forKey: .isReasoningExpanded)
         try container.encode(isContentExpanded, forKey: .isContentExpanded)
+        try container.encode(layoutVersion, forKey: .layoutVersion)
         try container.encode(createdAt, forKey: .createdAt)
         try container.encode(status, forKey: .status)
+    }
+
+    mutating func advanceLayoutVersion() {
+        layoutVersion &+= 1
     }
 }
 

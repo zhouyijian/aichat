@@ -66,10 +66,6 @@ extension ChatViewController {
 
     /// Refreshes one message row and optionally keeps viewport pinned to bottom.
     func updateMessageUI(id: UUID, shouldPinToBottom: Bool) {
-        let width = itemWidth()
-        let scale = collectionView.traitCollection.displayScale
-
-        viewModel.invalidateHeight(for: id, width: width, displayScale: scale)
         reconfigureMessage(id: id, animated: false)
 
         guard shouldPinToBottom else { return }
@@ -127,11 +123,7 @@ extension ChatViewController {
     func measureHeight(for message: Message, width: CGFloat) -> CGFloat {
         let displayScale = collectionView.traitCollection.displayScale
 
-        if let cachedHeight = viewModel.cachedHeight(
-            for: message.id,
-            width: width,
-            displayScale: displayScale
-        ) {
+        if let cachedHeight = viewModel.cachedHeight(for: message, width: width, displayScale: displayScale) {
             return cachedHeight
         }
 
@@ -142,12 +134,7 @@ extension ChatViewController {
             measuredHeight = exactMeasureHeight(for: message, width: width)
         }
 
-        viewModel.cacheHeight(
-            measuredHeight,
-            for: message.id,
-            width: width,
-            displayScale: displayScale
-        )
+        viewModel.cacheHeight(measuredHeight, for: message, width: width, displayScale: displayScale)
         return measuredHeight
     }
     
