@@ -26,9 +26,12 @@ final class ChatViewModel {
     // MARK: - State
     private(set) var conversations: [Conversation]
     private(set) var currentConversationID: UUID
+    private var currentConversationIndex: Int
     private let repository: ConversationRepository
     private let heightCache: MessageHeightCache
     private var assistantSegmentsCache: [UUID: AssistantSegmentsCacheEntry] = [:]
+    private var conversationIndexByID: [UUID: Int] = [:]
+    private var currentMessageIndexByID: [UUID: Int] = [:]
     
     var messages: [Message] {
         currentConversation?.messages ?? []
@@ -46,7 +49,10 @@ final class ChatViewModel {
             conversations = [Conversation()]
         }
         self.currentConversationID = conversations[0].id
+        self.currentConversationIndex = 0
         self.heightCache = heightCache
+        rebuildConversationIndex()
+        rebuildCurrentMessageIndex()
     }
 }
 
@@ -57,7 +63,15 @@ extension ChatViewModel {
     }
 
     func message(id: UUID) -> Message? {
-        messages.first(where: { $0.id == id })
+        guard
+            let index = currentMessageIndexByID[id],
+            let conversation = currentConversation,
+            conversation.messages.indices.contains(index)
+        else {
+            return nil
+        }
+
+        return conversation.messages[index]
     }
 }
 
@@ -82,6 +96,9 @@ extension ChatViewModel {
         let conversation = Conversation()
         conversations.insert(conversation, at: 0)
         currentConversationID = conversation.id
+        currentConversationIndex = 0
+        rebuildConversationIndex()
+        rebuildCurrentMessageIndex()
         invalidateAllHeights()
         pruneAssistantSegmentsCache()
         save()
@@ -90,8 +107,10 @@ extension ChatViewModel {
     
     @discardableResult
     func selectConversation(id: UUID) -> Bool {
-        guard conversations.contains(where: { $0.id == id }) else { return false }
+        guard let index = conversationIndexByID[id] else { return false }
         currentConversationID = id
+        currentConversationIndex = index
+        rebuildCurrentMessageIndex()
         invalidateAllHeights()
         pruneAssistantSegmentsCache()
         return true
@@ -135,11 +154,16 @@ extension ChatViewModel {
 // MARK: - Message Mutation
 extension ChatViewModel {
     func appendMessage(_ message: Message, persist: Bool = true) {
+        var appendedIndex: Int?
         mutateCurrentConversation(persist: persist, touchUpdatedAt: persist) { conversation in
             conversation.messages.append(message)
+            appendedIndex = conversation.messages.count - 1
             if message.role == .user, conversation.title == "新对话" {
                 conversation.title = makeTitle(from: message.content)
             }
+        }
+        if let appendedIndex {
+            currentMessageIndexByID[message.id] = appendedIndex
         }
         refreshAssistantSegmentsIfNeeded(for: message)
     }
@@ -156,7 +180,7 @@ extension ChatViewModel {
         var updatedMessage: Message?
 
         mutateCurrentConversation(persist: persist, touchUpdatedAt: persist) { conversation in
-            guard let idx = conversation.messages.firstIndex(where: { $0.id == id }) else { return }
+            guard let idx = currentMessageIndexByID[id] else { return }
             mutate(&conversation.messages[idx])
             updatedMessage = conversation.messages[idx]
         }
@@ -266,7 +290,10 @@ private extension ChatViewModel {
     static let responseCollapseLineLimit = 12
 
     var currentConversation: Conversation? {
-        conversations.first(where: { $0.id == currentConversationID })
+        guard conversations.indices.contains(currentConversationIndex) else { return nil }
+        let conversation = conversations[currentConversationIndex]
+        guard conversation.id == currentConversationID else { return nil }
+        return conversation
     }
     
     func makeTitle(from content: String) -> String {
@@ -315,15 +342,52 @@ private extension ChatViewModel {
         touchUpdatedAt: Bool = true,
         mutate: (inout Conversation) -> Void
     ) {
-        guard let idx = conversations.firstIndex(where: { $0.id == currentConversationID }) else { return }
+        guard let idx = resolveCurrentConversationIndex() else { return }
         mutate(&conversations[idx])
         if touchUpdatedAt {
             conversations[idx].updatedAt = Date()
             conversations.sort(by: { $0.updatedAt > $1.updatedAt })
+            refreshCurrentConversationIndex()
         }
         if persist {
             save()
         }
+    }
+
+    @discardableResult
+    func resolveCurrentConversationIndex() -> Int? {
+        if conversations.indices.contains(currentConversationIndex),
+           conversations[currentConversationIndex].id == currentConversationID {
+            return currentConversationIndex
+        }
+
+        refreshCurrentConversationIndex()
+        guard conversations.indices.contains(currentConversationIndex) else { return nil }
+        return currentConversationIndex
+    }
+
+    func refreshCurrentConversationIndex() {
+        rebuildConversationIndex()
+        if let index = conversationIndexByID[currentConversationID] {
+            currentConversationIndex = index
+        }
+    }
+
+    func rebuildConversationIndex() {
+        conversationIndexByID = Dictionary(
+            uniqueKeysWithValues: conversations.enumerated().map { ($1.id, $0) }
+        )
+    }
+
+    func rebuildCurrentMessageIndex() {
+        guard let conversation = currentConversation else {
+            currentMessageIndexByID = [:]
+            return
+        }
+
+        currentMessageIndexByID = Dictionary(
+            uniqueKeysWithValues: conversation.messages.enumerated().map { ($1.id, $0) }
+        )
     }
 }
 
