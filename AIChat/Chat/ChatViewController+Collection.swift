@@ -77,14 +77,38 @@ extension ChatViewController {
             self?.scrollToBottomByItem(animated: false)
         }
     }
+
+    func updateStreamingMessageUI(id: UUID, shouldPinToBottom: Bool) {
+        guard let message = viewModel.message(id: id) else { return }
+
+        let width = itemWidth()
+        guard width > 0 else {
+            updateMessageUI(id: id, shouldPinToBottom: shouldPinToBottom)
+            return
+        }
+
+        let segments = message.role == .assistant ? viewModel.assistantSegments(for: message) : nil
+        let nextState = makeStreamingLayoutState(for: message, segments: segments, width: width)
+        let previousState = streamingLayoutStates[id]
+        streamingLayoutStates[id] = nextState
+
+        guard previousState == nextState else {
+            updateMessageUI(id: id, shouldPinToBottom: shouldPinToBottom)
+            return
+        }
+
+        reconfigureVisibleMessageCellIfNeeded(id: id, message: message, segments: segments)
+    }
     
     func toggleReasoning(for id: UUID) {
+        streamingLayoutStates.removeValue(forKey: id)
         guard viewModel.toggleReasoning(for: id) else { return }
         updateMessageUI(id: id, shouldPinToBottom: false)
         viewModel.save()
     }
 
     func toggleContentExpansion(for id: UUID) {
+        streamingLayoutStates.removeValue(forKey: id)
         guard viewModel.toggleContentExpansion(for: id) else { return }
         updateMessageUI(id: id, shouldPinToBottom: false)
         viewModel.save()
@@ -258,6 +282,36 @@ extension ChatViewController {
             verticalFittingPriority: .fittingSizeLevel
         )
         return ceil(size.height)
+    }
+
+    private func makeStreamingLayoutState(
+        for message: Message,
+        segments: AssistantSegments?,
+        width: CGFloat
+    ) -> StreamingLayoutState {
+        let estimatedHeight = Int(fastMeasureHeight(for: message, width: width).rounded())
+        return StreamingLayoutState(estimatedHeight: estimatedHeight)
+    }
+
+    private func reconfigureVisibleMessageCellIfNeeded(
+        id: UUID,
+        message: Message,
+        segments: AssistantSegments?
+    ) {
+        guard
+            let indexPath = dataSource.indexPath(for: id),
+            let cell = collectionView.cellForItem(at: indexPath) as? MessageCell
+        else {
+            return
+        }
+
+        cell.configure(with: message, assistantSegments: segments)
+        cell.onToggleContentExpansion = { [weak self] in
+            self?.toggleContentExpansion(for: id)
+        }
+        cell.onToggleReasoning = { [weak self] in
+            self?.toggleReasoning(for: id)
+        }
     }
 }
 

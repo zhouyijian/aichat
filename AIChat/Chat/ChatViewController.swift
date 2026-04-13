@@ -10,6 +10,10 @@ import SnapKit
 
 final class ChatViewController: UIViewController {
 
+    struct StreamingLayoutState: Equatable {
+        let estimatedHeight: Int
+    }
+
     // MARK: - Dependencies
     let viewModel = ChatViewModel(repository: LocalConversationRepository())
     private let systemPrompt = "你是一个简洁、专业的中文助手。"
@@ -25,6 +29,7 @@ final class ChatViewController: UIViewController {
     private let sendButton = UIButton(type: .system)
     private var inputTextHeightConstraint: Constraint?
     private var currentStreamingAssistantID: UUID?
+    var streamingLayoutStates: [UUID: StreamingLayoutState] = [:]
 
     lazy var throttler = StreamingThrottler(
         shouldPinToBottom: { [weak self] in
@@ -32,7 +37,7 @@ final class ChatViewController: UIViewController {
             return !self.userIsInteracting && self.isNearBottom(tolerance: 150)
         },
         onTick: { [weak self] id, shouldPinToBottom in
-            self?.updateMessageUI(id: id, shouldPinToBottom: shouldPinToBottom)
+            self?.updateStreamingMessageUI(id: id, shouldPinToBottom: shouldPinToBottom)
         }
     )
 
@@ -208,6 +213,9 @@ final class ChatViewController: UIViewController {
     }
 
     private func stopCurrentStream(flushPending: Bool) {
+        if let currentStreamingAssistantID {
+            streamingLayoutStates.removeValue(forKey: currentStreamingAssistantID)
+        }
         openAI.stop()
         throttler.stop(flushPending: flushPending)
         viewModel.save()
@@ -219,6 +227,7 @@ final class ChatViewController: UIViewController {
     private func cancelCurrentStream() {
         guard isStreaming, let assistantID = currentStreamingAssistantID else { return }
         viewModel.setStatus(for: assistantID, status: .canceled)
+        streamingLayoutStates.removeValue(forKey: assistantID)
         updateMessageUI(id: assistantID, shouldPinToBottom: false)
         stopCurrentStream(flushPending: true)
     }
