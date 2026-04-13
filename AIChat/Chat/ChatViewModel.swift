@@ -2,7 +2,17 @@ import UIKit
 
 struct AssistantSegments {
     let responseText: String
+    let foldedResponseText: String?
     let reasoningText: String?
+
+    var isResponseFoldable: Bool {
+        foldedResponseText != nil
+    }
+
+    func displayedResponseText(isExpanded: Bool) -> String {
+        guard !isExpanded, let foldedResponseText else { return responseText }
+        return foldedResponseText
+    }
 }
 
 private struct AssistantSegmentsCacheEntry {
@@ -186,6 +196,13 @@ extension ChatViewModel {
         }
     }
 
+    @discardableResult
+    func toggleContentExpansion(for id: UUID) -> Bool {
+        updateMessage(id: id, persist: false) { message in
+            message.isContentExpanded.toggle()
+        }
+    }
+
     func setStatus(for id: UUID, status: Message.Status, persist: Bool = true) {
         _ = updateMessage(id: id, persist: persist) { message in
             message.status = status
@@ -224,6 +241,9 @@ extension ChatViewModel {
 
 // MARK: - Helpers
 private extension ChatViewModel {
+    static let responseCollapseCharacterLimit = 1_200
+    static let responseCollapseLineLimit = 12
+
     var currentConversation: Conversation? {
         conversations.first(where: { $0.id == currentConversationID })
     }
@@ -319,6 +339,7 @@ private extension ChatViewModel {
             let response = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
             return AssistantSegments(
                 responseText: response.isEmpty ? "..." : response,
+                foldedResponseText: makeFoldedResponseTextIfNeeded(from: response),
                 reasoningText: explicitReasoning
             )
         }
@@ -337,6 +358,7 @@ private extension ChatViewModel {
 
                 return AssistantSegments(
                     responseText: response.isEmpty ? "..." : response,
+                    foldedResponseText: makeFoldedResponseTextIfNeeded(from: response),
                     reasoningText: reasoning.isEmpty ? nil : reasoning
                 )
             } else {
@@ -347,6 +369,7 @@ private extension ChatViewModel {
 
                 return AssistantSegments(
                     responseText: prefix.isEmpty ? "..." : prefix,
+                    foldedResponseText: makeFoldedResponseTextIfNeeded(from: prefix),
                     reasoningText: reasoning.isEmpty ? nil : reasoning
                 )
             }
@@ -355,7 +378,57 @@ private extension ChatViewModel {
         let cleaned = content.trimmingCharacters(in: .whitespacesAndNewlines)
         return AssistantSegments(
             responseText: cleaned.isEmpty ? "..." : cleaned,
+            foldedResponseText: makeFoldedResponseTextIfNeeded(from: cleaned),
             reasoningText: nil
         )
+    }
+
+    func makeFoldedResponseTextIfNeeded(from responseText: String) -> String? {
+        let normalized = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return nil }
+
+        let lineCount = normalized.reduce(into: 1) { count, character in
+            if character == "\n" {
+                count += 1
+            }
+        }
+
+        let shouldFold =
+            normalized.count > Self.responseCollapseCharacterLimit ||
+            lineCount > Self.responseCollapseLineLimit
+
+        guard shouldFold else { return nil }
+
+        let characterLimitedIndex = normalized.index(
+            normalized.startIndex,
+            offsetBy: Self.responseCollapseCharacterLimit,
+            limitedBy: normalized.endIndex
+        ) ?? normalized.endIndex
+
+        let lineLimitedIndex = indexAfterLineLimit(
+            in: normalized,
+            lineLimit: Self.responseCollapseLineLimit
+        ) ?? normalized.endIndex
+
+        let previewEnd = min(characterLimitedIndex, lineLimitedIndex)
+        let preview = String(normalized[..<previewEnd]).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !preview.isEmpty, preview.count < normalized.count else { return nil }
+        return "\(preview)\n\n..."
+    }
+
+    func indexAfterLineLimit(in text: String, lineLimit: Int) -> String.Index? {
+        guard lineLimit > 0 else { return text.startIndex }
+
+        var lineBreakCount = 0
+        for index in text.indices {
+            if text[index] == "\n" {
+                lineBreakCount += 1
+                if lineBreakCount == lineLimit {
+                    return text.index(after: index)
+                }
+            }
+        }
+        return nil
     }
 }

@@ -15,6 +15,9 @@ extension ChatViewController {
             }
             let segments = message.role == .assistant ? self.viewModel.assistantSegments(for: message) : nil
             cell.configure(with: message, assistantSegments: segments)
+            cell.onToggleContentExpansion = { [weak self] in
+                self?.toggleContentExpansion(for: id)
+            }
             cell.onToggleReasoning = { [weak self] in
                 self?.toggleReasoning(for: id)
             }
@@ -77,6 +80,12 @@ extension ChatViewController {
     
     func toggleReasoning(for id: UUID) {
         guard viewModel.toggleReasoning(for: id) else { return }
+        updateMessageUI(id: id, shouldPinToBottom: false)
+        viewModel.save()
+    }
+
+    func toggleContentExpansion(for id: UUID) {
+        guard viewModel.toggleContentExpansion(for: id) else { return }
         updateMessageUI(id: id, shouldPinToBottom: false)
         viewModel.save()
     }
@@ -166,9 +175,14 @@ extension ChatViewController {
             arrangedHeights.append(messageHeight)
 
         case .assistant:
-            let responseText = segments?.responseText ?? fallbackResponseText(for: message)
+            let responseText = segments?.displayedResponseText(isExpanded: message.isContentExpanded) ?? fallbackResponseText(for: message)
             let responseHeight = textHeight(text: responseText, font: messageFont, width: textWidth)
             arrangedHeights.append(responseHeight)
+
+            if segments?.isResponseFoldable == true {
+                let contentButtonHeight = max(ceil(buttonFont.lineHeight), 20)
+                arrangedHeights.append(contentButtonHeight)
+            }
 
             let reasoningText = segments?.reasoningText
             let hasReasoning = !(reasoningText?.isEmpty ?? true)
@@ -208,7 +222,7 @@ extension ChatViewController {
     private func normalizedMainText(for message: Message, segments: AssistantSegments?) -> String {
         switch message.role {
         case .assistant:
-            return segments?.responseText ?? fallbackResponseText(for: message)
+            return segments?.displayedResponseText(isExpanded: message.isContentExpanded) ?? fallbackResponseText(for: message)
         case .user, .system:
             let text = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
             return text.isEmpty ? "..." : text

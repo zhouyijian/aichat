@@ -24,6 +24,7 @@ nonisolated struct Message: Hashable, Sendable, Codable {
     var content: String
     var reasoningContent: String?
     var isReasoningExpanded: Bool
+    var isContentExpanded: Bool
     let createdAt: Date
     var status: Status
     
@@ -33,6 +34,7 @@ nonisolated struct Message: Hashable, Sendable, Codable {
         content: String,
         reasoningContent: String? = nil,
         isReasoningExpanded: Bool = false,
+        isContentExpanded: Bool = false,
         createdAt: Date = Date(),
         status: Status = .success
     ) {
@@ -41,6 +43,7 @@ nonisolated struct Message: Hashable, Sendable, Codable {
         self.content = content
         self.reasoningContent = reasoningContent
         self.isReasoningExpanded = isReasoningExpanded
+        self.isContentExpanded = isContentExpanded
         self.createdAt = createdAt
         self.status = status
     }
@@ -53,6 +56,41 @@ nonisolated struct Message: Hashable, Sendable, Codable {
     // Equatable 也只比较 id
     static func == (lhs: Message, rhs: Message) -> Bool {
         return lhs.id == rhs.id
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case role
+        case content
+        case reasoningContent
+        case isReasoningExpanded
+        case isContentExpanded
+        case createdAt
+        case status
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        role = try container.decode(Role.self, forKey: .role)
+        content = try container.decode(String.self, forKey: .content)
+        reasoningContent = try container.decodeIfPresent(String.self, forKey: .reasoningContent)
+        isReasoningExpanded = try container.decodeIfPresent(Bool.self, forKey: .isReasoningExpanded) ?? false
+        isContentExpanded = try container.decodeIfPresent(Bool.self, forKey: .isContentExpanded) ?? false
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        status = try container.decode(Status.self, forKey: .status)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(role, forKey: .role)
+        try container.encode(content, forKey: .content)
+        try container.encodeIfPresent(reasoningContent, forKey: .reasoningContent)
+        try container.encode(isReasoningExpanded, forKey: .isReasoningExpanded)
+        try container.encode(isContentExpanded, forKey: .isContentExpanded)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(status, forKey: .status)
     }
 }
 

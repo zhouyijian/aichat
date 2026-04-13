@@ -4,11 +4,13 @@ import SnapKit
 final class MessageCell: UICollectionViewCell {
     
     static let reuseID = "MessageCell"
+    var onToggleContentExpansion: (() -> Void)?
     var onToggleReasoning: (() -> Void)?
     
     private let bubbleView = UIView()
     private let contentStackView = UIStackView()
     private let messageLabel = UILabel()
+    private let toggleContentButton = UIButton(type: .system)
     private let toggleReasoningButton = UIButton(type: .system)
     private let reasoningContainerView = UIView()
     private let reasoningLabel = UILabel()
@@ -17,10 +19,13 @@ final class MessageCell: UICollectionViewCell {
     private var centerAlignmentConstraint: Constraint?
     
     private var currentRole: Role?
+    private var currentHasFoldedContent: Bool?
+    private var currentContentExpanded: Bool?
     private var currentReasoningExpanded: Bool?
     private var currentHasReasoning: Bool?
     
     private var currentMessageText: String?
+    private var currentContentButtonTitle: String?
     private var currentReasoningText: String?
     private var currentReasoningButtonTitle: String?
     
@@ -38,16 +43,22 @@ final class MessageCell: UICollectionViewCell {
         
         messageLabel.text = nil
         reasoningLabel.text = nil
+        toggleContentButton.setTitle(nil, for: .normal)
         toggleReasoningButton.setTitle(nil, for: .normal)
+        onToggleContentExpansion = nil
         onToggleReasoning = nil
         
         currentRole = nil
+        currentHasFoldedContent = nil
+        currentContentExpanded = nil
         currentReasoningExpanded = nil
         currentHasReasoning = nil
         currentMessageText = nil
+        currentContentButtonTitle = nil
         currentReasoningText = nil
         currentReasoningButtonTitle = nil
         
+        toggleContentButton.isHidden = true
         toggleReasoningButton.isHidden = true
         reasoningContainerView.isHidden = true
     }
@@ -66,6 +77,10 @@ final class MessageCell: UICollectionViewCell {
         messageLabel.numberOfLines = 0
         messageLabel.font = .systemFont(ofSize: 16)
         
+        toggleContentButton.titleLabel?.font = .systemFont(ofSize: 13, weight: .medium)
+        toggleContentButton.contentHorizontalAlignment = .left
+        toggleContentButton.addTarget(self, action: #selector(didTapToggleContent), for: .touchUpInside)
+        
         toggleReasoningButton.titleLabel?.font = .systemFont(ofSize: 13, weight: .medium)
         toggleReasoningButton.contentHorizontalAlignment = .left
         toggleReasoningButton.addTarget(self, action: #selector(didTapToggleReasoning), for: .touchUpInside)
@@ -81,6 +96,7 @@ final class MessageCell: UICollectionViewCell {
         contentStackView.addArrangedSubview(toggleReasoningButton)
         contentStackView.addArrangedSubview(reasoningContainerView)
         contentStackView.addArrangedSubview(messageLabel)
+        contentStackView.addArrangedSubview(toggleContentButton)
 
         reasoningContainerView.addSubview(reasoningLabel)
         
@@ -141,15 +157,18 @@ final class MessageCell: UICollectionViewCell {
 
         let finalSegments = segments ?? AssistantSegments(
             responseText: message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "..." : message.content,
+            foldedResponseText: nil,
             reasoningText: nil
         )
 
         updateAssistantContent(
-            responseText: finalSegments.responseText,
+            responseText: finalSegments.displayedResponseText(isExpanded: message.isContentExpanded),
             reasoningText: finalSegments.reasoningText
         )
 
         updateAssistantStructure(
+            hasFoldedContent: finalSegments.isResponseFoldable,
+            isContentExpanded: message.isContentExpanded,
             hasReasoning: !(finalSegments.reasoningText?.isEmpty ?? true),
             isExpanded: message.isReasoningExpanded
         )
@@ -191,11 +210,19 @@ final class MessageCell: UICollectionViewCell {
     }
     
     @objc
+    private func didTapToggleContent() {
+        onToggleContentExpansion?()
+    }
+
+    @objc
     private func didTapToggleReasoning() {
         onToggleReasoning?()
     }
     
     private func hideReasoningIfNeeded() {
+        if currentHasFoldedContent != false || toggleContentButton.isHidden == false {
+            toggleContentButton.isHidden = true
+        }
         if currentHasReasoning != false || toggleReasoningButton.isHidden == false {
             toggleReasoningButton.isHidden = true
         }
@@ -206,11 +233,17 @@ final class MessageCell: UICollectionViewCell {
             reasoningLabel.text = nil
             currentReasoningText = nil
         }
+        if currentContentButtonTitle != nil {
+            toggleContentButton.setTitle(nil, for: .normal)
+            currentContentButtonTitle = nil
+        }
         if currentReasoningButtonTitle != nil {
             toggleReasoningButton.setTitle(nil, for: .normal)
             currentReasoningButtonTitle = nil
         }
         
+        currentHasFoldedContent = false
+        currentContentExpanded = nil
         currentHasReasoning = false
         currentReasoningExpanded = nil
     }
@@ -230,10 +263,28 @@ final class MessageCell: UICollectionViewCell {
     
     
     // MARK: - 结构更新（低频）
-    private func updateAssistantStructure(hasReasoning: Bool, isExpanded: Bool) {
+    private func updateAssistantStructure(
+        hasFoldedContent: Bool,
+        isContentExpanded: Bool,
+        hasReasoning: Bool,
+        isExpanded: Bool
+    ) {
+        let hasFoldedContentChanged = currentHasFoldedContent != hasFoldedContent
+        let contentExpandedChanged = currentContentExpanded != isContentExpanded
         let hasReasoningChanged = currentHasReasoning != hasReasoning
         let expandedChanged = currentReasoningExpanded != isExpanded
         
+        if hasFoldedContent {
+            let title = isContentExpanded ? "收起全文" : "展开全文"
+            if currentContentButtonTitle != title {
+                toggleContentButton.setTitle(title, for: .normal)
+                currentContentButtonTitle = title
+            }
+        } else if currentContentButtonTitle != nil {
+            toggleContentButton.setTitle(nil, for: .normal)
+            currentContentButtonTitle = nil
+        }
+
         if hasReasoningChanged {
             toggleReasoningButton.isHidden = !hasReasoning
         }
@@ -256,6 +307,12 @@ final class MessageCell: UICollectionViewCell {
             }
         }
         
+        if hasFoldedContentChanged || contentExpandedChanged {
+            toggleContentButton.isHidden = !hasFoldedContent
+        }
+        
+        currentHasFoldedContent = hasFoldedContent
+        currentContentExpanded = isContentExpanded
         currentHasReasoning = hasReasoning
         currentReasoningExpanded = isExpanded
     }
@@ -270,5 +327,3 @@ final class MessageCell: UICollectionViewCell {
     }
     
 }
-
-
