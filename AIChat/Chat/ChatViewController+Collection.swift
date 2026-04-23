@@ -3,45 +3,38 @@ import UIKit
 // MARK: - Data Source & Snapshot
 extension ChatViewController {
     func setupDataSource() {
-        dataSource = UICollectionViewDiffableDataSource<Section, UUID>(
+        dataSource = UICollectionViewDiffableDataSource<Section, ChatItem.ID>(
             collectionView: collectionView
         ) { [weak self] collectionView, indexPath, id in
-            let cell = collectionView.dequeueReusableCell(
-                withReuseIdentifier: MessageCell.reuseID,
-                for: indexPath
-            ) as! MessageCell
-            guard let self, let message = self.viewModel.message(id: id) else {
-                return cell
+            guard let self, let item = self.displayedItem(id: id) else {
+                return collectionView.dequeueReusableCell(
+                    withReuseIdentifier: ChatTextBlockCell.reuseID,
+                    for: indexPath
+                )
             }
-            let segments = message.role == .assistant ? self.viewModel.assistantSegments(for: message) : nil
-            cell.configure(with: message, assistantSegments: segments)
-            cell.onToggleContentExpansion = { [weak self] in
-                self?.toggleContentExpansion(for: id)
-            }
-            cell.onToggleReasoning = { [weak self] in
-                self?.toggleReasoning(for: id)
-            }
-            return cell
+
+            return self.dequeueConfiguredCell(for: item, in: collectionView, at: indexPath)
         }
     }
 
     func applySnapshot(animatingDifferences: Bool = true) {
-        var snapshot = NSDiffableDataSourceSnapshot<Section, UUID>()
+        let items = viewModel.chatItems
+        snapshotApplyGeneration &+= 1
+        let generation = snapshotApplyGeneration
+        prepareDisplayedItemsForSnapshot(items)
+
+        var snapshot = NSDiffableDataSourceSnapshot<Section, ChatItem.ID>()
         snapshot.appendSections([.main])
-        snapshot.appendItems(viewModel.messages.map(\.id), toSection: .main)
-        dataSource.apply(snapshot, animatingDifferences: animatingDifferences)
+        snapshot.appendItems(items.map(\.id), toSection: .main)
+        dataSource.apply(snapshot, animatingDifferences: animatingDifferences) { [weak self] in
+            guard self?.snapshotApplyGeneration == generation else { return }
+            self?.commitDisplayedItems(items)
+        }
     }
 
     func appendMessage(_ message: Message, scrollToBottom: Bool = false) {
         viewModel.appendMessage(message)
-
-        var snapshot = dataSource.snapshot()
-        if snapshot.sectionIdentifiers.isEmpty {
-            snapshot.appendSections([.main])
-        }
-        snapshot.appendItems([message.id], toSection: .main)
-        dataSource.apply(snapshot, animatingDifferences: true)
-
+        applySnapshot(animatingDifferences: true)
         viewModel.pruneHeightCache()
         updateScrollToBottomButtonVisibility()
 
@@ -52,11 +45,9 @@ extension ChatViewController {
     }
 
     func reconfigureMessage(id: UUID, animated: Bool = true) {
-        var snapshot = dataSource.snapshot()
-        snapshot.reconfigureItems([id])
-        dataSource.apply(snapshot, animatingDifferences: animated)
+        refreshMessageItems(id: id, animated: animated)
     }
-    
+
     func reloadConversationMessages() {
         applySnapshot(animatingDifferences: false)
         viewModel.pruneHeightCache()
@@ -64,9 +55,9 @@ extension ChatViewController {
         updateScrollToBottomButtonVisibility()
     }
 
-    /// Refreshes one message row and optionally keeps viewport pinned to bottom.
+    /// Refreshes one message's rendered blocks and optionally keeps viewport pinned to bottom.
     func updateMessageUI(id: UUID, shouldPinToBottom: Bool) {
-        reconfigureMessage(id: id, animated: false)
+        refreshMessageItems(id: id, animated: false)
 
         guard shouldPinToBottom else { return }
         DispatchQueue.main.async { [weak self] in
@@ -75,7 +66,7 @@ extension ChatViewController {
     }
 
     func updateStreamingMessageUI(id: UUID, shouldPinToBottom: Bool) {
-        guard let message = viewModel.message(id: id) else { return }
+        guard viewModel.message(id: id) != nil else { return }
 
         let width = itemWidth()
         guard width > 0 else {
@@ -83,8 +74,7 @@ extension ChatViewController {
             return
         }
 
-        let segments = message.role == .assistant ? viewModel.assistantSegments(for: message) : nil
-        let nextState = makeStreamingLayoutState(for: message, segments: segments, width: width)
+        let nextState = makeStreamingLayoutState(for: id, width: width)
         let previousState = streamingLayoutStates[id]
         streamingLayoutStates[id] = nextState
 
@@ -93,21 +83,157 @@ extension ChatViewController {
             return
         }
 
-        reconfigureVisibleMessageCellIfNeeded(id: id, message: message, segments: segments)
+        reconfigureVisibleMessageCellsIfNeeded(messageID: id)
     }
-    
+
     func toggleReasoning(for id: UUID) {
         streamingLayoutStates.removeValue(forKey: id)
         guard viewModel.toggleReasoning(for: id) else { return }
         updateMessageUI(id: id, shouldPinToBottom: false)
         viewModel.save()
     }
+}
 
-    func toggleContentExpansion(for id: UUID) {
-        streamingLayoutStates.removeValue(forKey: id)
-        guard viewModel.toggleContentExpansion(for: id) else { return }
-        updateMessageUI(id: id, shouldPinToBottom: false)
-        viewModel.save()
+private extension ChatViewController {
+    func dequeueConfiguredCell(
+        for item: ChatItem,
+        in collectionView: UICollectionView,
+        at indexPath: IndexPath
+    ) -> UICollectionViewCell {
+        switch item.kind {
+        case .code:
+            let cell = collectionView.dequeueReusableCell(
+                withReuseIdentifier: ChatCodeBlockCell.reuseID,
+                for: indexPath
+            ) as! ChatCodeBlockCell
+            cell.configure(with: item)
+            configureCopyActions(for: cell, item: item)
+            return cell
+
+        case .image:
+            let cell = collectionView.dequeueReusableCell(
+                withReuseIdentifier: ChatImageBlockCell.reuseID,
+                for: indexPath
+            ) as! ChatImageBlockCell
+            cell.configure(with: item)
+            configureCopyActions(for: cell, item: item)
+            return cell
+
+        case .control(let action):
+            let cell = collectionView.dequeueReusableCell(
+                withReuseIdentifier: ChatControlCell.reuseID,
+                for: indexPath
+            ) as! ChatControlCell
+            cell.configure(with: item)
+            cell.onTapAction = { [weak self] in
+                switch action {
+                case .toggleReasoning:
+                    self?.toggleReasoning(for: item.messageID)
+                }
+            }
+            configureCopyActions(for: cell, item: item)
+            return cell
+
+        case .markdown, .reasoning, .status:
+            let cell = collectionView.dequeueReusableCell(
+                withReuseIdentifier: ChatTextBlockCell.reuseID,
+                for: indexPath
+            ) as! ChatTextBlockCell
+            cell.configure(with: item)
+            configureCopyActions(for: cell, item: item)
+            return cell
+        }
+    }
+
+    func configureExistingCell(_ cell: UICollectionViewCell, with item: ChatItem) {
+        switch (cell, item.kind) {
+        case (let cell as ChatCodeBlockCell, .code):
+            cell.configure(with: item)
+            configureCopyActions(for: cell, item: item)
+        case (let cell as ChatImageBlockCell, .image):
+            cell.configure(with: item)
+            configureCopyActions(for: cell, item: item)
+        case (let cell as ChatControlCell, .control):
+            cell.configure(with: item)
+            configureCopyActions(for: cell, item: item)
+        case (let cell as ChatTextBlockCell, _):
+            cell.configure(with: item)
+            configureCopyActions(for: cell, item: item)
+        default:
+            break
+        }
+    }
+
+    func configureCopyActions(for cell: ChatBubbleCell, item: ChatItem) {
+        cell.onCopyBlock = item.isCopyable ? { [weak self] in
+            self?.copyToPasteboard(item.copyText)
+        } : nil
+
+        cell.onCopyMessage = { [weak self] in
+            guard let text = self?.viewModel.copyTextForMessage(id: item.messageID),
+                  !text.isEmpty else { return }
+            self?.copyToPasteboard(text)
+        }
+    }
+
+    func copyToPasteboard(_ text: String) {
+        UIPasteboard.general.string = text
+        let generator = UINotificationFeedbackGenerator()
+        generator.notificationOccurred(.success)
+    }
+
+    func refreshMessageItems(id: UUID, animated: Bool) {
+        let oldIDs = dataSource.snapshot().itemIdentifiers.filter { $0.messageID == id }
+        let newIDs = viewModel.itemIDs(for: id)
+
+        guard oldIDs == newIDs else {
+            applySnapshot(animatingDifferences: animated)
+            return
+        }
+
+        guard !newIDs.isEmpty else { return }
+        syncDisplayedItemsFromViewModel()
+        collectionView.collectionViewLayout.invalidateLayout()
+
+        var snapshot = dataSource.snapshot()
+        let existingIDs = newIDs.filter { snapshot.indexOfItem($0) != nil }
+        guard !existingIDs.isEmpty else { return }
+
+        snapshot.reconfigureItems(existingIDs)
+        dataSource.apply(snapshot, animatingDifferences: animated)
+    }
+
+    func reconfigureVisibleMessageCellsIfNeeded(messageID: UUID) {
+        syncDisplayedItemsFromViewModel()
+        let visibleIDs = viewModel.itemIDs(for: messageID)
+        for itemID in visibleIDs {
+            guard
+                let item = displayedItem(id: itemID),
+                let indexPath = dataSource.indexPath(for: itemID),
+                let cell = collectionView.cellForItem(at: indexPath)
+            else {
+                continue
+            }
+            configureExistingCell(cell, with: item)
+        }
+    }
+
+    func displayedItem(id: ChatItem.ID) -> ChatItem? {
+        displayedItemsByID[id] ?? viewModel.chatItem(id: id)
+    }
+
+    func prepareDisplayedItemsForSnapshot(_ items: [ChatItem]) {
+        for item in items {
+            displayedItemsByID[item.id] = item
+        }
+    }
+
+    func commitDisplayedItems(_ items: [ChatItem]) {
+        displayedItemsByID = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0) })
+    }
+
+    func syncDisplayedItemsFromViewModel() {
+        prepareDisplayedItemsForSnapshot(viewModel.chatItems)
     }
 }
 
@@ -120,131 +246,50 @@ extension ChatViewController {
         return collectionView.bounds.width - layout.sectionInset.left - layout.sectionInset.right
     }
 
-    func measureHeight(for message: Message, width: CGFloat) -> CGFloat {
+    func measureHeight(for item: ChatItem, width: CGFloat) -> CGFloat {
         let displayScale = collectionView.traitCollection.displayScale
 
-        if let cachedHeight = viewModel.cachedHeight(for: message, width: width, displayScale: displayScale) {
+        if let cachedHeight = viewModel.cachedHeight(for: item, width: width, displayScale: displayScale) {
             return cachedHeight
         }
 
-        let measuredHeight: CGFloat
-        if shouldUseFastMeasure(for: message) {
-            measuredHeight = fastMeasureHeight(for: message, width: width)
-        } else {
-            measuredHeight = exactMeasureHeight(for: message, width: width)
-        }
-
-        viewModel.cacheHeight(measuredHeight, for: message, width: width, displayScale: displayScale)
+        let measuredHeight = fastMeasureHeight(for: item, width: width)
+        viewModel.cacheHeight(measuredHeight, for: item, width: width, displayScale: displayScale)
         return measuredHeight
     }
-    
-    private func shouldUseFastMeasure(for message: Message) -> Bool {
-        guard message.role == .assistant else { return false }
 
-        let segments = viewModel.assistantSegments(for: message)
-        let totalLength = segments.responseText.count + (segments.reasoningText?.count ?? 0)
-
-        return isActivelyStreaming(message) || totalLength > 200
-    }
-    
-    private func isActivelyStreaming(_ message: Message) -> Bool {
-        switch message.status {
-        // 按你的实际枚举调整
-        case .streaming, .pending:
-            return true
-        default:
-            return false
-        }
-    }
-    
-    private func fastMeasureHeight(for message: Message, width: CGFloat) -> CGFloat {
+    private func fastMeasureHeight(for item: ChatItem, width: CGFloat) -> CGFloat {
         let bubbleWidth = floor(width * 0.82)
+        let outerVerticalInsets = (item.isFirstInMessage ? 6.0 : 0.0) + (item.isLastInMessage ? 6.0 : 0.0)
 
-        // bubble 内 stackView 左右 inset
-        let stackHorizontalInsets: CGFloat = 12 * 2
-        let stackVerticalInsets: CGFloat = 12 * 2
+        switch item.kind {
+        case .markdown:
+            let font = UIFont.systemFont(ofSize: 16)
+            let textWidth = max(0, bubbleWidth - 24)
+            return outerVerticalInsets + 24 + richTextHeight(for: item, font: font, width: textWidth)
 
-        // cell 外层 bubble 上下 inset
-        let outerVerticalInsets: CGFloat = 6 * 2
+        case .reasoning, .status:
+            let font = UIFont.systemFont(ofSize: 13)
+            let textWidth = max(0, bubbleWidth - 24)
+            return outerVerticalInsets + 24 + richTextHeight(for: item, font: font, width: textWidth)
 
-        let stackSpacing: CGFloat = 8
+        case .code(let language):
+            let font = UIFont.monospacedSystemFont(ofSize: 14, weight: .regular)
+            let textWidth = max(0, bubbleWidth - 40)
+            let languageHeight: CGFloat = language == nil ? 0 : 22
+            return outerVerticalInsets + 20 + 20 + languageHeight + textHeight(text: item.text, font: font, width: textWidth)
 
-        let messageFont = UIFont.systemFont(ofSize: 16)
-        let reasoningFont = UIFont.systemFont(ofSize: 13)
-        let buttonFont = UIFont.systemFont(ofSize: 13, weight: .medium)
+        case .image(_, let alt):
+            let captionHeight = (alt?.isEmpty == false) ? 28.0 : 0
+            return outerVerticalInsets + 20 + 180 + captionHeight
 
-        let segments = message.role == .assistant ? viewModel.assistantSegments(for: message) : nil
-
-        let textWidth = max(0, bubbleWidth - stackHorizontalInsets)
-
-        var arrangedHeights: [CGFloat] = []
-
-        switch message.role {
-        case .user, .system:
-            let text = normalizedMainText(for: message, segments: segments)
-            let messageHeight = textHeight(text: text, font: messageFont, width: textWidth)
-            arrangedHeights.append(messageHeight)
-
-        case .assistant:
-            let responseText = segments?.displayedResponseText(isExpanded: message.isContentExpanded) ?? fallbackResponseText(for: message)
-            let responseHeight = textHeight(text: responseText, font: messageFont, width: textWidth)
-            arrangedHeights.append(responseHeight)
-
-            if segments?.isResponseFoldable == true {
-                let contentButtonHeight = max(ceil(buttonFont.lineHeight), 20)
-                arrangedHeights.append(contentButtonHeight)
-            }
-
-            let reasoningText = segments?.reasoningText
-            let hasReasoning = !(reasoningText?.isEmpty ?? true)
-
-            if hasReasoning {
-                let buttonHeight = max(ceil(buttonFont.lineHeight), 20)
-                arrangedHeights.append(buttonHeight)
-
-                if message.isReasoningExpanded, let reasoningText, !reasoningText.isEmpty {
-                    // reasoningLabel 在 reasoningContainerView 内还有 10 + 10 的左右 inset
-                    let reasoningTextWidth = max(0, textWidth - 20)
-                    let reasoningTextHeight = textHeight(
-                        text: reasoningText,
-                        font: reasoningFont,
-                        width: reasoningTextWidth
-                    )
-
-                    // reasoningContainerView 高度 = reasoningLabel 高度 + 上下 10 + 10
-                    let reasoningContainerHeight = reasoningTextHeight + 20
-                    arrangedHeights.append(reasoningContainerHeight)
-                }
-            }
-        }
-
-        let arrangedContentHeight = arrangedHeights.reduce(0, +)
-        let totalSpacing = CGFloat(max(0, arrangedHeights.count - 1)) * stackSpacing
-
-        let totalHeight =
-            outerVerticalInsets +
-            stackVerticalInsets +
-            arrangedContentHeight +
-            totalSpacing
-
-        return ceil(totalHeight)
-    }
-    
-    private func normalizedMainText(for message: Message, segments: AssistantSegments?) -> String {
-        switch message.role {
-        case .assistant:
-            return segments?.displayedResponseText(isExpanded: message.isContentExpanded) ?? fallbackResponseText(for: message)
-        case .user, .system:
-            let text = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
-            return text.isEmpty ? "..." : text
+        case .control:
+            let font = UIFont.systemFont(ofSize: 13, weight: .medium)
+            let textWidth = max(0, bubbleWidth - 24)
+            return outerVerticalInsets + 16 + max(22, textHeight(text: item.text, font: font, width: textWidth))
         }
     }
 
-    private func fallbackResponseText(for message: Message) -> String {
-        let text = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
-        return text.isEmpty ? "..." : text
-    }
-    
     private func textHeight(text: String, font: UIFont, width: CGFloat) -> CGFloat {
         let safeText = text.isEmpty ? " " : text
         let rect = (safeText as NSString).boundingRect(
@@ -255,50 +300,34 @@ extension ChatViewController {
         )
         return ceil(rect.height)
     }
-    
-    private func exactMeasureHeight(for message: Message, width: CGFloat) -> CGFloat {
-        sizingCell.frame = CGRect(x: 0, y: 0, width: width, height: 1000)
-        let assistantSegments = message.role == .assistant ? viewModel.assistantSegments(for: message) : nil
-        sizingCell.configure(with: message, assistantSegments: assistantSegments)
-        sizingCell.layoutIfNeeded()
 
-        let target = CGSize(width: width, height: UIView.layoutFittingCompressedSize.height)
-        let size = sizingCell.contentView.systemLayoutSizeFitting(
-            target,
-            withHorizontalFittingPriority: .required,
-            verticalFittingPriority: .fittingSizeLevel
-        )
-        return ceil(size.height)
-    }
-
-    private func makeStreamingLayoutState(
-        for message: Message,
-        segments: AssistantSegments?,
-        width: CGFloat
-    ) -> StreamingLayoutState {
-        let estimatedHeight = Int(fastMeasureHeight(for: message, width: width).rounded())
-        return StreamingLayoutState(estimatedHeight: estimatedHeight)
-    }
-
-    private func reconfigureVisibleMessageCellIfNeeded(
-        id: UUID,
-        message: Message,
-        segments: AssistantSegments?
-    ) {
-        guard
-            let indexPath = dataSource.indexPath(for: id),
-            let cell = collectionView.cellForItem(at: indexPath) as? MessageCell
+    private func richTextHeight(for item: ChatItem, font: UIFont, width: CGFloat) -> CGFloat {
+        guard item.rendersMarkdown,
+              let attributed = MarkdownRenderer.attributedString(
+                from: item.text,
+                baseFont: font,
+                textColor: item.role == .user ? .white : .label
+              )
         else {
-            return
+            return textHeight(text: item.text, font: font, width: width)
         }
 
-        cell.configure(with: message, assistantSegments: segments)
-        cell.onToggleContentExpansion = { [weak self] in
-            self?.toggleContentExpansion(for: id)
+        let rect = attributed.boundingRect(
+            with: CGSize(width: width, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            context: nil
+        )
+        return ceil(rect.height)
+    }
+
+    private func makeStreamingLayoutState(for messageID: UUID, width: CGFloat) -> StreamingLayoutState {
+        let itemIDs = viewModel.itemIDs(for: messageID)
+        let heights = itemIDs.map { itemID in
+            viewModel.chatItem(id: itemID)
+                .map { Int(measureHeight(for: $0, width: width).rounded()) } ?? 0
         }
-        cell.onToggleReasoning = { [weak self] in
-            self?.toggleReasoning(for: id)
-        }
+
+        return StreamingLayoutState(itemIDs: itemIDs, estimatedHeights: heights)
     }
 }
 
@@ -308,8 +337,13 @@ extension ChatViewController: UICollectionViewDelegateFlowLayout {
                         layout collectionViewLayout: UICollectionViewLayout,
                         sizeForItemAt indexPath: IndexPath) -> CGSize {
         let width = itemWidth()
-        let message = viewModel.message(at: indexPath)
-        let height = measureHeight(for: message, width: width)
+        guard
+            let id = dataSource.itemIdentifier(for: indexPath),
+            let item = displayedItem(id: id)
+        else {
+            return CGSize(width: width, height: 1)
+        }
+        let height = measureHeight(for: item, width: width)
         return CGSize(width: width, height: height)
     }
 }

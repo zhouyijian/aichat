@@ -1,24 +1,12 @@
 import UIKit
 
-struct AssistantSegments {
-    let responseText: String
-    let foldedResponseText: String?
-    let reasoningText: String?
-
-    var isResponseFoldable: Bool {
-        foldedResponseText != nil
-    }
-
-    func displayedResponseText(isExpanded: Bool) -> String {
-        guard !isExpanded, let foldedResponseText else { return responseText }
-        return foldedResponseText
-    }
-}
-
-private struct AssistantSegmentsCacheEntry {
-    let rawContent: String
-    let rawReasoningContent: String?
-    let segments: AssistantSegments
+private struct ChatItemDraft {
+    let blockKey: String
+    let kind: ChatItem.Kind
+    let text: String
+    let copyText: String
+    let layoutVersion: Int
+    let rendersMarkdown: Bool
 }
 
 final class ChatViewModel {
@@ -29,14 +17,20 @@ final class ChatViewModel {
     private var currentConversationIndex: Int
     private let repository: ConversationRepository
     private let heightCache: MessageHeightCache
-    private var assistantSegmentsCache: [UUID: AssistantSegmentsCacheEntry] = [:]
     private var conversationIndexByID: [UUID: Int] = [:]
     private var currentMessageIndexByID: [UUID: Int] = [:]
-    
+    private var messageItemsByID: [UUID: [ChatItem]] = [:]
+    private var renderedItems: [ChatItem] = []
+    private var currentItemIndexByID: [ChatItem.ID: Int] = [:]
+
     var messages: [Message] {
         currentConversation?.messages ?? []
     }
-    
+
+    var chatItems: [ChatItem] {
+        renderedItems
+    }
+
     var currentConversationTitle: String {
         currentConversation?.title ?? "新对话"
     }
@@ -53,6 +47,7 @@ final class ChatViewModel {
         self.heightCache = heightCache
         rebuildConversationIndex()
         rebuildCurrentMessageIndex()
+        rebuildCurrentChatItems()
     }
 }
 
@@ -73,6 +68,43 @@ extension ChatViewModel {
 
         return conversation.messages[index]
     }
+
+    func chatItem(at indexPath: IndexPath) -> ChatItem? {
+        guard renderedItems.indices.contains(indexPath.item) else { return nil }
+        return renderedItems[indexPath.item]
+    }
+
+    func chatItem(id: ChatItem.ID) -> ChatItem? {
+        guard
+            let index = currentItemIndexByID[id],
+            renderedItems.indices.contains(index)
+        else {
+            return nil
+        }
+
+        return renderedItems[index]
+    }
+
+    func itemIDs(for messageID: UUID) -> [ChatItem.ID] {
+        messageItemsByID[messageID]?.map(\.id) ?? []
+    }
+
+    func copyTextForMessage(id: UUID) -> String? {
+        guard let message = message(id: id) else { return nil }
+
+        var parts: [String] = []
+        let reasoning = message.reasoningText
+        if !reasoning.isEmpty {
+            parts.append(reasoning)
+        }
+
+        let content = message.contentText
+        if !content.isEmpty {
+            parts.append(content)
+        }
+
+        return parts.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 }
 
 // MARK: - Conversation Operations
@@ -90,7 +122,7 @@ extension ChatViewModel {
                 )
             }
     }
-    
+
     @discardableResult
     func startNewConversation() -> Conversation {
         let conversation = Conversation()
@@ -99,28 +131,28 @@ extension ChatViewModel {
         currentConversationIndex = 0
         rebuildConversationIndex()
         rebuildCurrentMessageIndex()
+        rebuildCurrentChatItems()
         invalidateAllHeights()
-        pruneAssistantSegmentsCache()
         save()
         return conversation
     }
-    
+
     @discardableResult
     func selectConversation(id: UUID) -> Bool {
         guard let index = conversationIndexByID[id] else { return false }
         currentConversationID = id
         currentConversationIndex = index
         rebuildCurrentMessageIndex()
+        rebuildCurrentChatItems()
         invalidateAllHeights()
-        pruneAssistantSegmentsCache()
         return true
     }
-    
+
     func chatHistoryForRequest(systemPrompt: String) -> [[String: String]] {
         var result: [[String: String]] = [
             ["role": "system", "content": systemPrompt]
         ]
-        
+
         for message in messages {
             guard let role = apiRole(from: message.role),
                   let content = normalizedHistoryContent(from: message),
@@ -129,25 +161,9 @@ extension ChatViewModel {
         }
         return result
     }
-    
+
     func save() {
         repository.saveConversations(conversations)
-    }
-    
-    func assistantSegments(for message: Message) -> AssistantSegments {
-        if let cached = assistantSegmentsCache[message.id],
-           cached.rawContent == message.content,
-           cached.rawReasoningContent == message.reasoningContent {
-            return cached.segments
-        }
-
-        let segments = buildAssistantSegments(from: message)
-        assistantSegmentsCache[message.id] = AssistantSegmentsCacheEntry(
-            rawContent: message.content,
-            rawReasoningContent: message.reasoningContent,
-            segments: segments
-        )
-        return segments
     }
 }
 
@@ -159,63 +175,87 @@ extension ChatViewModel {
             conversation.messages.append(message)
             appendedIndex = conversation.messages.count - 1
             if message.role == .user, conversation.title == "新对话" {
-                conversation.title = makeTitle(from: message.content)
+                conversation.title = makeTitle(from: message.contentText)
             }
         }
         if let appendedIndex {
             currentMessageIndexByID[message.id] = appendedIndex
         }
-        refreshAssistantSegmentsIfNeeded(for: message)
+        rebuildItems(for: message)
+        rebuildRenderedItemsFromMessageCache()
     }
 
-    /// Applies in-place mutation to an existing message by id.
-    /// - Returns: true if target message exists and is updated.
     @discardableResult
     func updateMessage(
         id: UUID,
         persist: Bool = false,
-        affectsAssistantSegments: Bool = false,
         mutate: (inout Message) -> Void
     ) -> Bool {
-        var updatedMessage: Message?
+        var updated = false
 
         mutateCurrentConversation(persist: persist, touchUpdatedAt: persist) { conversation in
             guard let idx = currentMessageIndexByID[id] else { return }
             mutate(&conversation.messages[idx])
-            updatedMessage = conversation.messages[idx]
+            updated = true
         }
 
-        guard let updatedMessage else { return false }
-
-        if affectsAssistantSegments {
-            refreshAssistantSegmentsIfNeeded(for: updatedMessage)
+        guard updated else { return false }
+        if let message = message(id: id) {
+            rebuildItems(for: message)
         }
-
+        rebuildRenderedItemsFromMessageCache()
         return true
     }
-    
+
     func appendContent(to id: UUID, delta: String, persist: Bool = false) {
-        _ = updateMessage(id: id, persist: persist, affectsAssistantSegments: true) { message in
-            message.content += delta
+        _ = updateMessage(id: id, persist: persist) { message in
+            ThinkTagContentRouter.append(delta, to: &message)
             message.advanceLayoutVersion()
         }
     }
 
     func appendReasoning(to id: UUID, delta: String, persist: Bool = false) {
-        _ = updateMessage(id: id, persist: persist, affectsAssistantSegments: true) { message in
-            let current = message.reasoningContent ?? ""
-            message.reasoningContent = current + delta
+        _ = updateMessage(id: id, persist: persist) { message in
+            MarkdownBlockWriter.append(delta, to: &message.reasoningBlocks)
             message.advanceLayoutVersion()
         }
     }
-    
+
+    func appendStreamDelta(
+        to id: UUID,
+        contentDelta: String?,
+        reasoningDelta: String?,
+        persist: Bool = false
+    ) {
+        guard contentDelta?.isEmpty == false || reasoningDelta?.isEmpty == false else { return }
+
+        _ = updateMessage(id: id, persist: persist) { message in
+            if let reasoningDelta, !reasoningDelta.isEmpty {
+                MarkdownBlockWriter.append(reasoningDelta, to: &message.reasoningBlocks)
+            }
+            if let contentDelta, !contentDelta.isEmpty {
+                ThinkTagContentRouter.append(contentDelta, to: &message)
+            }
+            if message.status != .streaming {
+                message.status = .streaming
+            }
+            message.advanceLayoutVersion()
+        }
+    }
+
     func setContent(for id: UUID, text: String, persist: Bool = true) {
-        _ = updateMessage(id: id, persist: persist, affectsAssistantSegments: true) { message in
-            message.content = text
+        _ = updateMessage(id: id, persist: persist) { message in
+            message.blocks = []
+            message.reasoningBlocks = []
+            message.thinkRoutingState = ThinkRoutingState()
+            ThinkTagContentRouter.append(text, to: &message)
+            ThinkTagContentRouter.finalize(&message)
+            MarkdownBlockWriter.finalize(&message.blocks)
+            MarkdownBlockWriter.finalize(&message.reasoningBlocks)
             message.advanceLayoutVersion()
         }
     }
-    
+
     @discardableResult
     func toggleReasoning(for id: UUID) -> Bool {
         updateMessage(id: id, persist: false) { message in
@@ -224,48 +264,50 @@ extension ChatViewModel {
         }
     }
 
-    @discardableResult
-    func toggleContentExpansion(for id: UUID) -> Bool {
-        updateMessage(id: id, persist: false) { message in
-            message.isContentExpanded.toggle()
-            message.advanceLayoutVersion()
-        }
-    }
-
     func setStatus(for id: UUID, status: Message.Status, persist: Bool = true) {
+        if let message = message(id: id), message.status == status, !status.isTerminal {
+            return
+        }
+
         _ = updateMessage(id: id, persist: persist) { message in
             message.status = status
+            if status.isTerminal {
+                ThinkTagContentRouter.finalize(&message)
+                MarkdownBlockWriter.finalize(&message.blocks)
+                MarkdownBlockWriter.finalize(&message.reasoningBlocks)
+            }
+            message.advanceLayoutVersion()
         }
     }
 }
 
 // MARK: - Height Cache Operations
 extension ChatViewModel {
-    func cachedHeight(for message: Message, width: CGFloat, displayScale: CGFloat) -> CGFloat? {
+    func cachedHeight(for item: ChatItem, width: CGFloat, displayScale: CGFloat) -> CGFloat? {
         heightCache.cachedHeight(
-            for: message.id,
+            for: item.id.cacheKey,
             width: width,
             displayScale: displayScale,
-            layoutVersion: message.layoutVersion
+            layoutVersion: item.layoutVersion
         )
     }
 
-    func cacheHeight(_ height: CGFloat, for message: Message, width: CGFloat, displayScale: CGFloat) {
+    func cacheHeight(_ height: CGFloat, for item: ChatItem, width: CGFloat, displayScale: CGFloat) {
         heightCache.cacheHeight(
             height,
-            for: message.id,
+            for: item.id.cacheKey,
             width: width,
             displayScale: displayScale,
-            layoutVersion: message.layoutVersion
+            layoutVersion: item.layoutVersion
         )
     }
 
-    func invalidateHeight(for message: Message, width: CGFloat, displayScale: CGFloat) {
+    func invalidateHeight(for item: ChatItem, width: CGFloat, displayScale: CGFloat) {
         heightCache.invalidateHeight(
-            for: message.id,
+            for: item.id.cacheKey,
             width: width,
             displayScale: displayScale,
-            layoutVersion: message.layoutVersion
+            layoutVersion: item.layoutVersion
         )
     }
 
@@ -274,28 +316,204 @@ extension ChatViewModel {
     }
 
     func pruneHeightCache() {
-        let validIDs = Set(messages.map(\.id))
-        heightCache.prune(validMessageIDs: validIDs)
+        let validItemKeys = Set(renderedItems.map(\.id.cacheKey))
+        heightCache.prune(validItemKeys: validItemKeys)
     }
-    
-    func pruneAssistantSegmentsCache() {
-        let validIDs = Set(messages.map(\.id))
-        assistantSegmentsCache = assistantSegmentsCache.filter { validIDs.contains($0.key) }
+}
+
+// MARK: - Render Projection
+private extension ChatViewModel {
+    func rebuildCurrentChatItems() {
+        messageItemsByID = Dictionary(
+            uniqueKeysWithValues: messages.map { message in
+                (message.id, makeChatItems(for: message))
+            }
+        )
+        rebuildRenderedItemsFromMessageCache()
+    }
+
+    func rebuildItems(for message: Message) {
+        messageItemsByID[message.id] = makeChatItems(for: message)
+    }
+
+    func rebuildRenderedItemsFromMessageCache() {
+        renderedItems = messages.flatMap { messageItemsByID[$0.id] ?? [] }
+        currentItemIndexByID = Dictionary(
+            uniqueKeysWithValues: renderedItems.enumerated().map { ($1.id, $0) }
+        )
+    }
+
+    func makeChatItems(for message: Message) -> [ChatItem] {
+        let drafts: [ChatItemDraft]
+
+        switch message.role {
+        case .user, .system:
+            drafts = makeContentDrafts(
+                from: message.blocks.isEmpty ? [MessageBlock(kind: .markdown, text: "...", isComplete: true)] : message.blocks,
+                keyPrefix: message.role == .user ? "user" : "system",
+                role: message.role,
+                forceMarkdown: message.role != .user
+            )
+        case .assistant:
+            drafts = makeAssistantDrafts(for: message)
+        }
+
+        return drafts.enumerated().map { index, draft in
+            ChatItem(
+                id: ChatItem.ID(messageID: message.id, blockKey: draft.blockKey),
+                messageID: message.id,
+                role: message.role,
+                kind: draft.kind,
+                text: draft.text,
+                copyText: draft.copyText,
+                layoutVersion: draft.layoutVersion,
+                rendersMarkdown: draft.rendersMarkdown,
+                isFirstInMessage: index == 0,
+                isLastInMessage: index == drafts.count - 1
+            )
+        }
+    }
+
+    func makeAssistantDrafts(for message: Message) -> [ChatItemDraft] {
+        var drafts: [ChatItemDraft] = []
+
+        if !message.reasoningBlocks.isEmpty {
+            drafts.append(
+                ChatItemDraft(
+                    blockKey: "reasoning-toggle",
+                    kind: .control(action: .toggleReasoning),
+                    text: message.isReasoningExpanded ? "隐藏思考过程" : "显示思考过程",
+                    copyText: "",
+                    layoutVersion: message.layoutVersion,
+                    rendersMarkdown: false
+                )
+            )
+
+            if message.isReasoningExpanded {
+                drafts.append(
+                    contentsOf: makeContentDrafts(
+                        from: message.reasoningBlocks,
+                        keyPrefix: "reasoning",
+                        role: .assistant,
+                        forceMarkdown: true,
+                        forcedKind: .reasoning
+                    )
+                )
+            }
+        }
+
+        if message.blocks.isEmpty {
+            drafts.append(
+                ChatItemDraft(
+                    blockKey: "response-placeholder",
+                    kind: .markdown,
+                    text: "...",
+                    copyText: "",
+                    layoutVersion: message.layoutVersion,
+                    rendersMarkdown: false
+                )
+            )
+        } else {
+            drafts.append(
+                contentsOf: makeContentDrafts(
+                    from: message.blocks,
+                    keyPrefix: "response",
+                    role: .assistant,
+                    forceMarkdown: true
+                )
+            )
+        }
+
+        if let statusDraft = makeStatusDraft(for: message) {
+            drafts.append(statusDraft)
+        }
+
+        return drafts
+    }
+
+    func makeContentDrafts(
+        from blocks: [MessageBlock],
+        keyPrefix: String,
+        role: Role,
+        forceMarkdown: Bool,
+        forcedKind: ChatItem.Kind? = nil
+    ) -> [ChatItemDraft] {
+        blocks.enumerated().map { index, block in
+            let key = "\(keyPrefix)-\(block.id.uuidString)-\(index)"
+            let kind: ChatItem.Kind
+            let rendersMarkdown: Bool
+            let copyText: String
+
+            switch block.kind {
+            case .markdown:
+                kind = forcedKind ?? .markdown
+                rendersMarkdown = forceMarkdown && block.isComplete
+                copyText = block.text
+            case .code(let language):
+                kind = .code(language: language)
+                rendersMarkdown = false
+                copyText = block.text
+            case .image(let url, let alt):
+                kind = .image(url: url, alt: alt)
+                rendersMarkdown = false
+                copyText = "![\(alt ?? "")](\(url))"
+            }
+
+            return ChatItemDraft(
+                blockKey: key,
+                kind: kind,
+                text: block.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "..." : block.text,
+                copyText: copyText,
+                layoutVersion: block.version ^ block.text.hashValue ^ (block.isComplete ? 1 : 0),
+                rendersMarkdown: rendersMarkdown
+            )
+        }
+    }
+
+    func makeStatusDraft(for message: Message) -> ChatItemDraft? {
+        switch message.status {
+        case .pending where message.blocks.isEmpty:
+            return ChatItemDraft(
+                blockKey: "status",
+                kind: .status,
+                text: "正在准备回复...",
+                copyText: "",
+                layoutVersion: message.layoutVersion,
+                rendersMarkdown: false
+            )
+        case .canceled:
+            return ChatItemDraft(
+                blockKey: "status",
+                kind: .status,
+                text: "已停止生成",
+                copyText: "",
+                layoutVersion: message.layoutVersion,
+                rendersMarkdown: false
+            )
+        case .failed(let reason) where message.blocks.isEmpty:
+            return ChatItemDraft(
+                blockKey: "status",
+                kind: .status,
+                text: "生成失败：\(reason)",
+                copyText: "",
+                layoutVersion: message.layoutVersion,
+                rendersMarkdown: false
+            )
+        default:
+            return nil
+        }
     }
 }
 
 // MARK: - Helpers
 private extension ChatViewModel {
-    static let responseCollapseCharacterLimit = 1_200
-    static let responseCollapseLineLimit = 12
-
     var currentConversation: Conversation? {
         guard conversations.indices.contains(currentConversationIndex) else { return nil }
         let conversation = conversations[currentConversationIndex]
         guard conversation.id == currentConversationID else { return nil }
         return conversation
     }
-    
+
     func makeTitle(from content: String) -> String {
         let trimmed = content
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -303,7 +521,7 @@ private extension ChatViewModel {
         guard !trimmed.isEmpty else { return "新对话" }
         return String(trimmed.prefix(20))
     }
-    
+
     func makePreview(for conversation: Conversation) -> String {
         for message in conversation.messages.reversed() {
             guard let normalized = normalizedHistoryContent(from: message), !normalized.isEmpty else { continue }
@@ -311,7 +529,7 @@ private extension ChatViewModel {
         }
         return "还没有消息"
     }
-    
+
     func apiRole(from role: Role) -> String? {
         switch role {
         case .user:
@@ -322,21 +540,14 @@ private extension ChatViewModel {
             return nil
         }
     }
-    
+
     func normalizedHistoryContent(from message: Message) -> String? {
-        if !message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return message.content
-                .removingThinkTagContent()
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        
-        if let reasoning = message.reasoningContent?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !reasoning.isEmpty {
-            return reasoning
-        }
-        return nil
+        let content = message.contentText
+            .removingThinkTagContent()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return content.isEmpty ? nil : content
     }
-    
+
     func mutateCurrentConversation(
         persist: Bool,
         touchUpdatedAt: Bool = true,
@@ -389,118 +600,6 @@ private extension ChatViewModel {
             uniqueKeysWithValues: conversation.messages.enumerated().map { ($1.id, $0) }
         )
     }
-}
-
-private extension String {
-    func removingThinkTagContent() -> String {
-        replacingOccurrences(
-            of: "<think>[\\s\\S]*?</think>",
-            with: "",
-            options: .regularExpression
-        )
-    }
-}
-
-private extension ChatViewModel {
-    func refreshAssistantSegmentsIfNeeded(for message: Message) {
-        guard message.role == .assistant else {
-            assistantSegmentsCache.removeValue(forKey: message.id)
-            return
-        }
-
-        let segments = buildAssistantSegments(from: message)
-        assistantSegmentsCache[message.id] = AssistantSegmentsCacheEntry(
-            rawContent: message.content,
-            rawReasoningContent: message.reasoningContent,
-            segments: segments
-        )
-    }
-    
-    func buildAssistantSegments(from message: Message) -> AssistantSegments {
-        let explicitReasoning = message.reasoningContent?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let hasExplicitReasoning = !(explicitReasoning?.isEmpty ?? true)
-
-        if hasExplicitReasoning {
-            let response = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
-            return AssistantSegments(
-                responseText: response.isEmpty ? "..." : response,
-                foldedResponseText: makeFoldedResponseTextIfNeeded(from: response),
-                reasoningText: explicitReasoning
-            )
-        }
-
-        let content = message.content
-        if let startRange = content.range(of: "<think>") {
-            if let endRange = content.range(of: "</think>"),
-               startRange.lowerBound < endRange.lowerBound {
-                let reasoning = String(content[startRange.upperBound..<endRange.lowerBound])
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                let response = content.replacingCharacters(
-                    in: startRange.lowerBound..<endRange.upperBound,
-                    with: ""
-                )
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-
-                return AssistantSegments(
-                    responseText: response.isEmpty ? "..." : response,
-                    foldedResponseText: makeFoldedResponseTextIfNeeded(from: response),
-                    reasoningText: reasoning.isEmpty ? nil : reasoning
-                )
-            } else {
-                let reasoning = String(content[startRange.upperBound...])
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                let prefix = String(content[..<startRange.lowerBound])
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-
-                return AssistantSegments(
-                    responseText: prefix.isEmpty ? "..." : prefix,
-                    foldedResponseText: makeFoldedResponseTextIfNeeded(from: prefix),
-                    reasoningText: reasoning.isEmpty ? nil : reasoning
-                )
-            }
-        }
-
-        let cleaned = content.trimmingCharacters(in: .whitespacesAndNewlines)
-        return AssistantSegments(
-            responseText: cleaned.isEmpty ? "..." : cleaned,
-            foldedResponseText: makeFoldedResponseTextIfNeeded(from: cleaned),
-            reasoningText: nil
-        )
-    }
-
-    func makeFoldedResponseTextIfNeeded(from responseText: String) -> String? {
-        let normalized = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalized.isEmpty else { return nil }
-
-        let lineCount = normalized.reduce(into: 1) { count, character in
-            if character == "\n" {
-                count += 1
-            }
-        }
-
-        let shouldFold =
-            normalized.count > Self.responseCollapseCharacterLimit ||
-            lineCount > Self.responseCollapseLineLimit
-
-        guard shouldFold else { return nil }
-
-        let characterLimitedIndex = normalized.index(
-            normalized.startIndex,
-            offsetBy: Self.responseCollapseCharacterLimit,
-            limitedBy: normalized.endIndex
-        ) ?? normalized.endIndex
-
-        let lineLimitedIndex = indexAfterLineLimit(
-            in: normalized,
-            lineLimit: Self.responseCollapseLineLimit
-        ) ?? normalized.endIndex
-
-        let previewEnd = min(characterLimitedIndex, lineLimitedIndex)
-        let preview = String(normalized[..<previewEnd]).trimmingCharacters(in: .whitespacesAndNewlines)
-
-        guard !preview.isEmpty, preview.count < normalized.count else { return nil }
-        return "\(preview)\n\n..."
-    }
 
     func indexAfterLineLimit(in text: String, lineLimit: Int) -> String.Index? {
         guard lineLimit > 0 else { return text.startIndex }
@@ -515,5 +614,15 @@ private extension ChatViewModel {
             }
         }
         return nil
+    }
+}
+
+private extension String {
+    func removingThinkTagContent() -> String {
+        replacingOccurrences(
+            of: "<think>[\\s\\S]*?</think>",
+            with: "",
+            options: .regularExpression
+        )
     }
 }

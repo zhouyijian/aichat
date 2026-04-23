@@ -11,7 +11,8 @@ import SnapKit
 final class ChatViewController: UIViewController {
 
     struct StreamingLayoutState: Equatable {
-        let estimatedHeight: Int
+        let itemIDs: [ChatItem.ID]
+        let estimatedHeights: [Int]
     }
 
     // MARK: - Dependencies
@@ -21,8 +22,9 @@ final class ChatViewController: UIViewController {
 
     // MARK: - UI
     var collectionView: UICollectionView!
-    var dataSource: UICollectionViewDiffableDataSource<Section, UUID>!
-    lazy var sizingCell = MessageCell(frame: .zero)
+    var dataSource: UICollectionViewDiffableDataSource<Section, ChatItem.ID>!
+    var displayedItemsByID: [ChatItem.ID: ChatItem] = [:]
+    var snapshotApplyGeneration = 0
     private let inputContainerView = UIView()
     private let inputBackgroundView = UIView()
     private let inputTextView = UITextView()
@@ -152,13 +154,11 @@ final class ChatViewController: UIViewController {
             onDelta: { [weak self] contentDelta, reasoningDelta in
                 guard let self else { return }
                 Task { @MainActor in
-                    if let reasoningDelta {
-                        self.viewModel.appendReasoning(to: assistantID, delta: reasoningDelta)
-                    }
-                    if let contentDelta {
-                        self.viewModel.appendContent(to: assistantID, delta: contentDelta)
-                    }
-                    self.viewModel.setStatus(for: assistantID, status: .streaming)
+                    self.viewModel.appendStreamDelta(
+                        to: assistantID,
+                        contentDelta: contentDelta,
+                        reasoningDelta: reasoningDelta
+                    )
                     self.throttler.markChanged(id: assistantID)
                 }
             },
@@ -174,7 +174,7 @@ final class ChatViewController: UIViewController {
             onError: { [weak self] error in
                 guard let self else { return }
                 Task { @MainActor in
-                    let currentText = self.viewModel.message(id: assistantID)?.content ?? ""
+                    let currentText = self.viewModel.message(id: assistantID)?.contentText ?? ""
                     let message = currentText.isEmpty ? "❌ \(error.localizedDescription)" : "\(currentText)\n\n❌ \(error.localizedDescription)"
                     self.viewModel.setContent(for: assistantID, text: message)
                     self.viewModel.setStatus(for: assistantID, status: .failed(error.localizedDescription))
@@ -297,7 +297,7 @@ extension ChatViewController {
     func setupCollectionView() {
         let layout = UICollectionViewFlowLayout()
         layout.scrollDirection = .vertical
-        layout.minimumLineSpacing = 10
+        layout.minimumLineSpacing = 0
         layout.minimumInteritemSpacing = 0
         layout.sectionInset = UIEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
         layout.estimatedItemSize = .zero
@@ -307,7 +307,10 @@ extension ChatViewController {
         collectionView.alwaysBounceVertical = true
         collectionView.delegate = self
 
-        collectionView.register(MessageCell.self, forCellWithReuseIdentifier: MessageCell.reuseID)
+        collectionView.register(ChatTextBlockCell.self, forCellWithReuseIdentifier: ChatTextBlockCell.reuseID)
+        collectionView.register(ChatCodeBlockCell.self, forCellWithReuseIdentifier: ChatCodeBlockCell.reuseID)
+        collectionView.register(ChatImageBlockCell.self, forCellWithReuseIdentifier: ChatImageBlockCell.reuseID)
+        collectionView.register(ChatControlCell.self, forCellWithReuseIdentifier: ChatControlCell.reuseID)
         view.addSubview(collectionView)
 
         collectionView.snp.makeConstraints { make in

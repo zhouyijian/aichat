@@ -21,7 +21,7 @@ extension ChatViewController {
     }
     
     func scrollToBottomByItem(animated: Bool = false) {
-        let lastItem = viewModel.messages.count - 1
+        let lastItem = viewModel.chatItems.count - 1
         guard lastItem >= 0 else { return }
 
         let indexPath = IndexPath(item: lastItem, section: 0)

@@ -13,7 +13,7 @@ struct LocalConversationRepository: ConversationRepository {
 
     init(
         defaults: UserDefaults = .standard,
-        key: String = "ai-chat.conversations.v1"
+        key: String = "ai-chat.conversations.v2.blocks"
     ) {
         self.defaults = defaults
         self.key = key
