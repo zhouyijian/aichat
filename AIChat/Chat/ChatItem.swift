@@ -1,5 +1,11 @@
 import Foundation
 
+nonisolated enum TableColumnAlignment: Hashable, Sendable {
+    case leading
+    case center
+    case trailing
+}
+
 nonisolated struct ChatItem: Hashable, Sendable {
     nonisolated struct ID: Hashable, Sendable {
         let messageID: UUID
@@ -12,6 +18,10 @@ nonisolated struct ChatItem: Hashable, Sendable {
 
     nonisolated enum Kind: Hashable, Sendable {
         case markdown
+        case heading(level: Int)
+        case quote
+        case list
+        case table(columns: Int, alignments: [TableColumnAlignment])
         case code(language: String?)
         case image(url: String, alt: String?)
         case reasoning

@@ -308,6 +308,7 @@ extension ChatViewController {
         collectionView.delegate = self
 
         collectionView.register(ChatTextBlockCell.self, forCellWithReuseIdentifier: ChatTextBlockCell.reuseID)
+        collectionView.register(ChatTableBlockCell.self, forCellWithReuseIdentifier: ChatTableBlockCell.reuseID)
         collectionView.register(ChatCodeBlockCell.self, forCellWithReuseIdentifier: ChatCodeBlockCell.reuseID)
         collectionView.register(ChatImageBlockCell.self, forCellWithReuseIdentifier: ChatImageBlockCell.reuseID)
         collectionView.register(ChatControlCell.self, forCellWithReuseIdentifier: ChatControlCell.reuseID)

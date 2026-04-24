@@ -438,35 +438,60 @@ private extension ChatViewModel {
         forceMarkdown: Bool,
         forcedKind: ChatItem.Kind? = nil
     ) -> [ChatItemDraft] {
-        blocks.enumerated().map { index, block in
+        blocks.enumerated().flatMap { index, block in
             let key = "\(keyPrefix)-\(block.id.uuidString)-\(index)"
-            let kind: ChatItem.Kind
-            let rendersMarkdown: Bool
-            let copyText: String
 
             switch block.kind {
             case .markdown:
-                kind = forcedKind ?? .markdown
-                rendersMarkdown = forceMarkdown && block.isComplete
-                copyText = block.text
-            case .code(let language):
-                kind = .code(language: language)
-                rendersMarkdown = false
-                copyText = block.text
-            case .image(let url, let alt):
-                kind = .image(url: url, alt: alt)
-                rendersMarkdown = false
-                copyText = "![\(alt ?? "")](\(url))"
-            }
+                if forceMarkdown, block.isComplete, forcedKind == nil {
+                    let projectedBlocks = MarkdownBlockProjector.project(block.text)
+                    if !projectedBlocks.isEmpty {
+                        return projectedBlocks.enumerated().map { projectedIndex, projected in
+                            ChatItemDraft(
+                                blockKey: "\(key)-\(projected.keySuffix)-\(projectedIndex)",
+                                kind: projected.kind,
+                                text: projected.text,
+                                copyText: projected.copyText,
+                                layoutVersion: block.version &* 31 &+ projectedIndex &* 7 &+ (block.isComplete ? 1 : 0),
+                                rendersMarkdown: true
+                            )
+                        }
+                    }
+                }
 
-            return ChatItemDraft(
-                blockKey: key,
-                kind: kind,
-                text: block.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "..." : block.text,
-                copyText: copyText,
-                layoutVersion: block.version ^ block.text.hashValue ^ (block.isComplete ? 1 : 0),
-                rendersMarkdown: rendersMarkdown
-            )
+                return [
+                    ChatItemDraft(
+                        blockKey: key,
+                        kind: forcedKind ?? .markdown,
+                        text: block.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "..." : block.text,
+                        copyText: block.text,
+                        layoutVersion: block.version &* 31 &+ (block.isComplete ? 1 : 0),
+                        rendersMarkdown: forceMarkdown && block.isComplete
+                    )
+                ]
+            case .code(let language):
+                return [
+                    ChatItemDraft(
+                        blockKey: key,
+                        kind: .code(language: language),
+                        text: block.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "..." : block.text,
+                        copyText: block.text,
+                        layoutVersion: block.version &* 31 &+ (block.isComplete ? 1 : 0),
+                        rendersMarkdown: false
+                    )
+                ]
+            case .image(let url, let alt):
+                return [
+                    ChatItemDraft(
+                        blockKey: key,
+                        kind: .image(url: url, alt: alt),
+                        text: block.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "..." : block.text,
+                        copyText: "![\(alt ?? "")](\(url))",
+                        layoutVersion: block.version &* 31 &+ (block.isComplete ? 1 : 0),
+                        rendersMarkdown: false
+                    )
+                ]
+            }
         }
     }
 

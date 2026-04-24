@@ -101,6 +101,15 @@ private extension ChatViewController {
         at indexPath: IndexPath
     ) -> UICollectionViewCell {
         switch item.kind {
+        case .table:
+            let cell = collectionView.dequeueReusableCell(
+                withReuseIdentifier: ChatTableBlockCell.reuseID,
+                for: indexPath
+            ) as! ChatTableBlockCell
+            cell.configure(with: item)
+            configureCopyActions(for: cell, item: item)
+            return cell
+
         case .code:
             let cell = collectionView.dequeueReusableCell(
                 withReuseIdentifier: ChatCodeBlockCell.reuseID,
@@ -134,7 +143,7 @@ private extension ChatViewController {
             configureCopyActions(for: cell, item: item)
             return cell
 
-        case .markdown, .reasoning, .status:
+        case .markdown, .heading, .quote, .list, .reasoning, .status:
             let cell = collectionView.dequeueReusableCell(
                 withReuseIdentifier: ChatTextBlockCell.reuseID,
                 for: indexPath
@@ -147,6 +156,9 @@ private extension ChatViewController {
 
     func configureExistingCell(_ cell: UICollectionViewCell, with item: ChatItem) {
         switch (cell, item.kind) {
+        case (let cell as ChatTableBlockCell, .table):
+            cell.configure(with: item)
+            configureCopyActions(for: cell, item: item)
         case (let cell as ChatCodeBlockCell, .code):
             cell.configure(with: item)
             configureCopyActions(for: cell, item: item)
@@ -259,25 +271,60 @@ extension ChatViewController {
     }
 
     private func fastMeasureHeight(for item: ChatItem, width: CGFloat) -> CGFloat {
-        let bubbleWidth = floor(width * 0.82)
         let outerVerticalInsets = (item.isFirstInMessage ? 6.0 : 0.0) + (item.isLastInMessage ? 6.0 : 0.0)
 
         switch item.kind {
         case .markdown:
             let font = UIFont.systemFont(ofSize: 16)
-            let textWidth = max(0, bubbleWidth - 24)
+            let textWidth = max(0, containerWidth(for: item, within: width) - 24)
             return outerVerticalInsets + 24 + richTextHeight(for: item, font: font, width: textWidth)
+
+        case .heading(let level):
+            let font: UIFont
+            switch level {
+            case 1:
+                font = .systemFont(ofSize: 26, weight: .semibold)
+            case 2:
+                font = .systemFont(ofSize: 22, weight: .semibold)
+            case 3:
+                font = .systemFont(ofSize: 19, weight: .semibold)
+            case 4:
+                font = .systemFont(ofSize: 17, weight: .semibold)
+            default:
+                font = .systemFont(ofSize: 16, weight: .semibold)
+            }
+            let textWidth = max(0, containerWidth(for: item, within: width) - 24)
+            return outerVerticalInsets + 24 + richTextHeight(for: item, font: font, width: textWidth)
+
+        case .quote:
+            let font = UIFont.systemFont(ofSize: 15)
+            let textWidth = max(0, containerWidth(for: item, within: width) - 37)
+            return outerVerticalInsets + 24 + richTextHeight(for: item, font: font, width: textWidth)
+
+        case .list:
+            let font = UIFont.systemFont(ofSize: 16)
+            let textWidth = max(0, containerWidth(for: item, within: width) - 24)
+            return outerVerticalInsets + 24 + richTextHeight(for: item, font: font, width: textWidth)
+
+        case .table:
+            let rowCount = max(1, item.text.split(separator: "\n", omittingEmptySubsequences: false).count)
+            let headerHeight: CGFloat = 40
+            let bodyRowHeight: CGFloat = 44
+            let separatorHeight = CGFloat(max(0, rowCount - 1))
+            let contentHeight = headerHeight + CGFloat(max(0, rowCount - 1)) * bodyRowHeight + separatorHeight
+            return outerVerticalInsets + 20 + contentHeight
 
         case .reasoning, .status:
             let font = UIFont.systemFont(ofSize: 13)
-            let textWidth = max(0, bubbleWidth - 24)
+            let textWidth = max(0, containerWidth(for: item, within: width) - 24)
             return outerVerticalInsets + 24 + richTextHeight(for: item, font: font, width: textWidth)
 
         case .code(let language):
             let font = UIFont.monospacedSystemFont(ofSize: 14, weight: .regular)
-            let textWidth = max(0, bubbleWidth - 40)
+            let textWidth = max(0, containerWidth(for: item, within: width) - 40)
             let languageHeight: CGFloat = language == nil ? 0 : 22
-            return outerVerticalInsets + 20 + 20 + languageHeight + textHeight(text: item.text, font: font, width: textWidth)
+            let codeTopOffset: CGFloat = 4
+            return outerVerticalInsets + 20 + 20 + languageHeight + codeTopOffset + textHeight(text: item.text, font: font, width: textWidth)
 
         case .image(_, let alt):
             let captionHeight = (alt?.isEmpty == false) ? 28.0 : 0
@@ -285,8 +332,24 @@ extension ChatViewController {
 
         case .control:
             let font = UIFont.systemFont(ofSize: 13, weight: .medium)
-            let textWidth = max(0, bubbleWidth - 24)
+            let textWidth = max(0, containerWidth(for: item, within: width) - 24)
             return outerVerticalInsets + 16 + max(22, textHeight(text: item.text, font: font, width: textWidth))
+        }
+    }
+
+    private func containerWidth(for item: ChatItem, within width: CGFloat) -> CGFloat {
+        if usesExpandedAssistantLayout(for: item) {
+            return max(0, width - 16)
+        }
+        return floor(width * 0.82)
+    }
+
+    private func usesExpandedAssistantLayout(for item: ChatItem) -> Bool {
+        guard item.role == .assistant else { return false }
+
+        switch item.kind {
+        case .markdown, .heading, .quote, .list, .table, .code, .image, .reasoning, .status, .control:
+            return true
         }
     }
 

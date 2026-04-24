@@ -3,17 +3,28 @@ import SnapKit
 
 class ChatBubbleCell: UICollectionViewCell, UIContextMenuInteractionDelegate {
 
+    enum Presentation: Equatable {
+        case userBubble
+        case assistantFlow
+        case assistantBubble
+        case systemBubble
+    }
+
     let bubbleView = UIView()
     var onCopyBlock: (() -> Void)?
     var onCopyMessage: (() -> Void)?
 
+    private var leadingMinimumConstraint: Constraint?
+    private var trailingMaximumConstraint: Constraint?
     private var leadingAlignmentConstraint: Constraint?
     private var trailingAlignmentConstraint: Constraint?
     private var centerAlignmentConstraint: Constraint?
+    private var compactMaxWidthConstraint: Constraint?
     private var assistantWidthConstraint: Constraint?
+    private var assistantFlowTrailingConstraint: Constraint?
     private var topConstraint: Constraint?
     private var bottomConstraint: Constraint?
-    private var currentRole: Role?
+    private var currentPresentation: Presentation?
     private var currentFirstInMessage: Bool?
     private var currentLastInMessage: Bool?
 
@@ -31,16 +42,17 @@ class ChatBubbleCell: UICollectionViewCell, UIContextMenuInteractionDelegate {
         super.prepareForReuse()
         onCopyBlock = nil
         onCopyMessage = nil
-        currentRole = nil
+        currentPresentation = nil
         currentFirstInMessage = nil
         currentLastInMessage = nil
     }
 
     func configureChrome(for item: ChatItem) {
-        updateAlignmentIfNeeded(for: item.role)
+        let presentation = presentation(for: item)
+        updateAlignmentIfNeeded(for: presentation)
         updateInsetsIfNeeded(isFirst: item.isFirstInMessage, isLast: item.isLastInMessage)
-        updateCornersIfNeeded(role: item.role, isFirst: item.isFirstInMessage, isLast: item.isLastInMessage)
-        applyStyle(for: item.role)
+        updateCornersIfNeeded(for: presentation, isFirst: item.isFirstInMessage, isLast: item.isLastInMessage)
+        applyStyle(for: presentation)
     }
 
     func contextMenuInteraction(
@@ -76,36 +88,52 @@ class ChatBubbleCell: UICollectionViewCell, UIContextMenuInteractionDelegate {
         bubbleView.snp.makeConstraints { make in
             topConstraint = make.top.equalToSuperview().offset(6).constraint
             bottomConstraint = make.bottom.equalToSuperview().offset(-6).constraint
-            make.width.lessThanOrEqualTo(contentView.snp.width).multipliedBy(0.82)
+            compactMaxWidthConstraint = make.width.lessThanOrEqualTo(contentView.snp.width).multipliedBy(0.82).constraint
             assistantWidthConstraint = make.width.equalTo(contentView.snp.width).multipliedBy(0.82).constraint
             assistantWidthConstraint?.deactivate()
-            make.leading.greaterThanOrEqualToSuperview().offset(16)
-            make.trailing.lessThanOrEqualToSuperview().offset(-16)
+            leadingMinimumConstraint = make.leading.greaterThanOrEqualToSuperview().offset(16).constraint
+            trailingMaximumConstraint = make.trailing.lessThanOrEqualToSuperview().offset(-16).constraint
             leadingAlignmentConstraint = make.leading.equalToSuperview().offset(16).constraint
             trailingAlignmentConstraint = make.trailing.equalToSuperview().offset(-16).constraint
+            assistantFlowTrailingConstraint = make.trailing.equalToSuperview().offset(-16).constraint
+            assistantFlowTrailingConstraint?.deactivate()
             centerAlignmentConstraint = make.centerX.equalToSuperview().constraint
         }
     }
 
-    private func updateAlignmentIfNeeded(for role: Role) {
-        guard currentRole != role else { return }
+    private func updateAlignmentIfNeeded(for presentation: Presentation) {
+        let horizontalInset = horizontalInset(for: presentation)
+        leadingMinimumConstraint?.update(offset: horizontalInset)
+        trailingMaximumConstraint?.update(offset: -horizontalInset)
+        leadingAlignmentConstraint?.update(offset: horizontalInset)
+        trailingAlignmentConstraint?.update(offset: -horizontalInset)
+        assistantFlowTrailingConstraint?.update(offset: -horizontalInset)
+
+        guard currentPresentation != presentation else { return }
 
         leadingAlignmentConstraint?.deactivate()
         trailingAlignmentConstraint?.deactivate()
+        assistantFlowTrailingConstraint?.deactivate()
         centerAlignmentConstraint?.deactivate()
+        compactMaxWidthConstraint?.deactivate()
         assistantWidthConstraint?.deactivate()
 
-        switch role {
-        case .user:
+        switch presentation {
+        case .userBubble:
+            compactMaxWidthConstraint?.activate()
             trailingAlignmentConstraint?.activate()
-        case .assistant:
+        case .assistantFlow:
             leadingAlignmentConstraint?.activate()
-            assistantWidthConstraint?.activate()
-        case .system:
+            assistantFlowTrailingConstraint?.activate()
+        case .assistantBubble:
+            leadingAlignmentConstraint?.activate()
+            assistantFlowTrailingConstraint?.activate()
+        case .systemBubble:
+            compactMaxWidthConstraint?.activate()
             centerAlignmentConstraint?.activate()
         }
 
-        currentRole = role
+        currentPresentation = presentation
     }
 
     private func updateInsetsIfNeeded(isFirst: Bool, isLast: Bool) {
@@ -117,11 +145,16 @@ class ChatBubbleCell: UICollectionViewCell, UIContextMenuInteractionDelegate {
         currentLastInMessage = isLast
     }
 
-    private func updateCornersIfNeeded(role: Role, isFirst: Bool, isLast: Bool) {
+    private func updateCornersIfNeeded(for presentation: Presentation, isFirst: Bool, isLast: Bool) {
+        guard presentation != .assistantFlow else {
+            bubbleView.layer.maskedCorners = []
+            return
+        }
+
         let corners: CACornerMask
 
-        switch role {
-        case .assistant where !(isFirst && isLast):
+        switch presentation {
+        case .assistantBubble where !(isFirst && isLast):
             switch (isFirst, isLast) {
             case (true, false):
                 corners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
@@ -142,14 +175,45 @@ class ChatBubbleCell: UICollectionViewCell, UIContextMenuInteractionDelegate {
         bubbleView.layer.maskedCorners = corners
     }
 
-    private func applyStyle(for role: Role) {
-        switch role {
-        case .user:
+    private func applyStyle(for presentation: Presentation) {
+        switch presentation {
+        case .userBubble:
+            bubbleView.layer.cornerRadius = 16
             bubbleView.backgroundColor = .systemBlue
-        case .assistant:
+        case .assistantFlow:
+            bubbleView.layer.cornerRadius = 0
+            bubbleView.backgroundColor = .clear
+        case .assistantBubble:
+            bubbleView.layer.cornerRadius = 16
             bubbleView.backgroundColor = .secondarySystemBackground
-        case .system:
+        case .systemBubble:
+            bubbleView.layer.cornerRadius = 16
             bubbleView.backgroundColor = .systemGray5
+        }
+    }
+
+    private func horizontalInset(for presentation: Presentation) -> CGFloat {
+        switch presentation {
+        case .userBubble, .systemBubble:
+            return 16
+        case .assistantFlow, .assistantBubble:
+            return 8
+        }
+    }
+
+    private func presentation(for item: ChatItem) -> Presentation {
+        switch item.role {
+        case .user:
+            return .userBubble
+        case .assistant:
+            switch item.kind {
+            case .markdown, .heading, .quote, .list, .status, .control:
+                return .assistantFlow
+            case .table, .code, .image, .reasoning:
+                return .assistantBubble
+            }
+        case .system:
+            return .systemBubble
         }
     }
 }
@@ -159,6 +223,9 @@ final class ChatTextBlockCell: ChatBubbleCell {
     static let reuseID = "ChatTextBlockCell"
 
     private let label = UILabel()
+    private let quoteStripe = UIView()
+    private var labelLeadingConstraint: Constraint?
+    private var labelLeadingWithStripeConstraint: Constraint?
     private var currentText: String?
     private var currentKind: ChatItem.Kind?
     private var currentRendersMarkdown: Bool?
@@ -176,6 +243,7 @@ final class ChatTextBlockCell: ChatBubbleCell {
         super.prepareForReuse()
         label.text = nil
         label.attributedText = nil
+        quoteStripe.isHidden = true
         currentText = nil
         currentKind = nil
         currentRendersMarkdown = nil
@@ -186,15 +254,42 @@ final class ChatTextBlockCell: ChatBubbleCell {
 
         if currentKind != item.kind {
             switch item.kind {
+            case .heading(let level):
+                label.font = headingFont(level: level)
+                label.textColor = item.role == .user ? .white : .label
+                quoteStripe.isHidden = true
+                labelLeadingWithStripeConstraint?.deactivate()
+                labelLeadingConstraint?.activate()
+            case .quote:
+                label.font = .systemFont(ofSize: 15)
+                label.textColor = item.role == .user ? .white : .secondaryLabel
+                quoteStripe.isHidden = false
+                labelLeadingConstraint?.deactivate()
+                labelLeadingWithStripeConstraint?.activate()
+            case .list:
+                label.font = .systemFont(ofSize: 16)
+                label.textColor = item.role == .user ? .white : .label
+                quoteStripe.isHidden = true
+                labelLeadingWithStripeConstraint?.deactivate()
+                labelLeadingConstraint?.activate()
             case .reasoning:
                 label.font = .systemFont(ofSize: 13)
                 label.textColor = .secondaryLabel
+                quoteStripe.isHidden = true
+                labelLeadingWithStripeConstraint?.deactivate()
+                labelLeadingConstraint?.activate()
             case .status:
                 label.font = .systemFont(ofSize: 13)
                 label.textColor = .secondaryLabel
+                quoteStripe.isHidden = true
+                labelLeadingWithStripeConstraint?.deactivate()
+                labelLeadingConstraint?.activate()
             default:
                 label.font = .systemFont(ofSize: 16)
                 label.textColor = item.role == .user ? .white : .label
+                quoteStripe.isHidden = true
+                labelLeadingWithStripeConstraint?.deactivate()
+                labelLeadingConstraint?.activate()
             }
             currentKind = item.kind
         }
@@ -218,9 +313,38 @@ final class ChatTextBlockCell: ChatBubbleCell {
 
     private func setupLabel() {
         label.numberOfLines = 0
+        quoteStripe.backgroundColor = .systemGray3
+        quoteStripe.layer.cornerRadius = 1.5
+
+        bubbleView.addSubview(quoteStripe)
         bubbleView.addSubview(label)
+
+        quoteStripe.snp.makeConstraints { make in
+            make.leading.equalToSuperview().offset(12)
+            make.top.bottom.equalToSuperview().inset(12)
+            make.width.equalTo(3)
+        }
         label.snp.makeConstraints { make in
-            make.edges.equalToSuperview().inset(12)
+            make.top.bottom.trailing.equalToSuperview().inset(12)
+            labelLeadingConstraint = make.leading.equalToSuperview().offset(12).constraint
+            labelLeadingWithStripeConstraint = make.leading.equalTo(quoteStripe.snp.trailing).offset(10).constraint
+        }
+        quoteStripe.isHidden = true
+        labelLeadingWithStripeConstraint?.deactivate()
+    }
+
+    private func headingFont(level: Int) -> UIFont {
+        switch level {
+        case 1:
+            return .systemFont(ofSize: 26, weight: .semibold)
+        case 2:
+            return .systemFont(ofSize: 22, weight: .semibold)
+        case 3:
+            return .systemFont(ofSize: 19, weight: .semibold)
+        case 4:
+            return .systemFont(ofSize: 17, weight: .semibold)
+        default:
+            return .systemFont(ofSize: 16, weight: .semibold)
         }
     }
 }
@@ -303,6 +427,201 @@ final class ChatCodeBlockCell: ChatBubbleCell {
             make.top.equalTo(languageLabel.snp.bottom).offset(4)
             make.leading.trailing.bottom.equalToSuperview().inset(10)
         }
+    }
+}
+
+final class ChatTableBlockCell: ChatBubbleCell {
+
+    static let reuseID = "ChatTableBlockCell"
+    private static let layoutCache = NSCache<NSString, TableLayoutCacheEntry>()
+
+    private let scrollView = UIScrollView()
+    private let contentStackView = UIStackView()
+    private var contentWidthConstraint: Constraint?
+    private var currentText: String?
+    private var currentRole: Role?
+    private var currentAlignments: [TableColumnAlignment] = []
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        setupTableViews()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        currentText = nil
+        currentRole = nil
+        currentAlignments = []
+        contentStackView.arrangedSubviews.forEach { row in
+            contentStackView.removeArrangedSubview(row)
+            row.removeFromSuperview()
+        }
+    }
+
+    func configure(with item: ChatItem) {
+        configureChrome(for: item)
+        guard case .table(_, let alignments) = item.kind else { return }
+
+        if currentText != item.text || currentRole != item.role || currentAlignments != alignments {
+            rebuildRows(from: item.text, role: item.role, alignments: alignments)
+            currentText = item.text
+            currentRole = item.role
+            currentAlignments = alignments
+        }
+    }
+
+    private func setupTableViews() {
+        scrollView.showsHorizontalScrollIndicator = false
+        scrollView.alwaysBounceHorizontal = false
+
+        contentStackView.axis = .vertical
+        contentStackView.spacing = 1
+        contentStackView.distribution = .fill
+
+        bubbleView.addSubview(scrollView)
+        scrollView.addSubview(contentStackView)
+
+        scrollView.snp.makeConstraints { make in
+            make.edges.equalToSuperview().inset(6)
+            make.height.greaterThanOrEqualTo(44)
+        }
+        contentStackView.snp.makeConstraints { make in
+            make.edges.equalToSuperview()
+            contentWidthConstraint = make.width.equalTo(0).constraint
+        }
+    }
+
+    private func rebuildRows(from text: String, role: Role, alignments: [TableColumnAlignment]) {
+        contentStackView.arrangedSubviews.forEach { row in
+            contentStackView.removeArrangedSubview(row)
+            row.removeFromSuperview()
+        }
+
+        let layout = tableLayout(for: text)
+        let rows = layout.rows
+        guard !rows.isEmpty else { return }
+
+        contentWidthConstraint?.update(offset: layout.totalWidth)
+        scrollView.alwaysBounceHorizontal = layout.totalWidth > bounds.width - 20
+        let textColor: UIColor = role == .user ? .white : .label
+
+        for (rowIndex, cells) in rows.enumerated() {
+            let rowView = UIStackView()
+            rowView.axis = .horizontal
+            rowView.spacing = 1
+            rowView.distribution = .fill
+            rowView.backgroundColor = .separator
+            rowView.snp.makeConstraints { make in
+                make.height.equalTo(rowIndex == 0 ? 40 : 44)
+            }
+
+            for (columnIndex, cell) in cells.enumerated() {
+                let label = UILabel()
+                label.numberOfLines = 0
+                label.text = cell.isEmpty ? " " : cell
+                label.textColor = textColor
+                label.font = rowIndex == 0
+                    ? .systemFont(ofSize: 14, weight: .semibold)
+                    : .systemFont(ofSize: 14)
+                label.textAlignment = textAlignment(for: alignments[safe: columnIndex] ?? .leading)
+
+                let container = UIView()
+                container.backgroundColor = rowIndex == 0
+                    ? .tertiarySystemBackground
+                    : .systemBackground.withAlphaComponent(role == .user ? 0.18 : 0.55)
+                container.setContentCompressionResistancePriority(.required, for: .horizontal)
+                container.setContentHuggingPriority(.required, for: .horizontal)
+                container.snp.makeConstraints { make in
+                    make.width.equalTo(layout.columnWidths[columnIndex])
+                }
+                container.addSubview(label)
+                label.snp.makeConstraints { make in
+                    make.edges.equalToSuperview().inset(UIEdgeInsets(top: 10, left: 8, bottom: 10, right: 8))
+                }
+
+                rowView.addArrangedSubview(container)
+            }
+
+            contentStackView.addArrangedSubview(rowView)
+        }
+    }
+
+    private func textAlignment(for alignment: TableColumnAlignment) -> NSTextAlignment {
+        switch alignment {
+        case .leading:
+            return .left
+        case .center:
+            return .center
+        case .trailing:
+            return .right
+        }
+    }
+
+    private func tableLayout(for text: String) -> TableLayoutCacheEntry {
+        let key = text as NSString
+        if let cached = Self.layoutCache.object(forKey: key) {
+            return cached
+        }
+
+        let rows = text
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { row in
+                row.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+            }
+        let columnCount = rows.map(\.count).max() ?? 0
+        guard columnCount > 0 else {
+            let empty = TableLayoutCacheEntry(rows: [], columnWidths: [], totalWidth: 0)
+            Self.layoutCache.setObject(empty, forKey: key)
+            return empty
+        }
+
+        let headerFont = UIFont.systemFont(ofSize: 14, weight: .semibold)
+        let bodyFont = UIFont.systemFont(ofSize: 14)
+        let horizontalPadding: CGFloat = 20
+        let minWidth: CGFloat = 64
+        let maxWidth: CGFloat = 220
+
+        var widths = Array(repeating: minWidth, count: columnCount)
+        for (rowIndex, row) in rows.enumerated() {
+            for columnIndex in 0..<columnCount {
+                let text = columnIndex < row.count ? row[columnIndex] : ""
+                let font = rowIndex == 0 ? headerFont : bodyFont
+                let measuredWidth = ceil((text.isEmpty ? " " : text as NSString).boundingRect(
+                    with: CGSize(width: CGFloat.greatestFiniteMagnitude, height: 24),
+                    options: [.usesLineFragmentOrigin, .usesFontLeading],
+                    attributes: [.font: font],
+                    context: nil
+                ).width)
+                widths[columnIndex] = max(widths[columnIndex], min(maxWidth, measuredWidth + horizontalPadding))
+            }
+        }
+
+        let totalWidth = widths.reduce(0, +) + CGFloat(max(0, columnCount - 1))
+        let layout = TableLayoutCacheEntry(rows: rows, columnWidths: widths, totalWidth: totalWidth)
+        Self.layoutCache.setObject(layout, forKey: key)
+        return layout
+    }
+
+    private final class TableLayoutCacheEntry: NSObject {
+        let rows: [[String]]
+        let columnWidths: [CGFloat]
+        let totalWidth: CGFloat
+
+        init(rows: [[String]], columnWidths: [CGFloat], totalWidth: CGFloat) {
+            self.rows = rows
+            self.columnWidths = columnWidths
+            self.totalWidth = totalWidth
+        }
+    }
+}
+
+private extension Array {
+    subscript(safe index: Int) -> Element? {
+        indices.contains(index) ? self[index] : nil
     }
 }
 
