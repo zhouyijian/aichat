@@ -9,6 +9,21 @@ private struct ChatItemDraft {
     let rendersMarkdown: Bool
 }
 
+private struct ContentDraftCacheKey: Hashable {
+    let keyPrefix: String
+    let blockID: UUID
+    let blockIndex: Int
+    let blockKind: MessageBlockKind
+    let blockVersion: Int
+    let forceMarkdown: Bool
+    let forcedKind: ChatItem.Kind?
+}
+
+private struct MarkdownProjectionCacheKey: Hashable {
+    let blockID: UUID
+    let blockVersion: Int
+}
+
 final class ChatViewModel {
 
     // MARK: - State
@@ -22,6 +37,8 @@ final class ChatViewModel {
     private var messageItemsByID: [UUID: [ChatItem]] = [:]
     private var renderedItems: [ChatItem] = []
     private var currentItemIndexByID: [ChatItem.ID: Int] = [:]
+    private var contentDraftCache: [ContentDraftCacheKey: [ChatItemDraft]] = [:]
+    private var markdownProjectionCache: [MarkdownProjectionCacheKey: [ProjectedMarkdownBlock]] = [:]
 
     var messages: [Message] {
         currentConversation?.messages ?? []
@@ -181,7 +198,7 @@ extension ChatViewModel {
         if let appendedIndex {
             currentMessageIndexByID[message.id] = appendedIndex
         }
-        rebuildItems(for: message)
+        cacheItems(for: message)
         rebuildRenderedItemsFromMessageCache()
     }
 
@@ -201,9 +218,13 @@ extension ChatViewModel {
 
         guard updated else { return false }
         if let message = message(id: id) {
-            rebuildItems(for: message)
+            let items = cacheItems(for: message)
+            if !replaceRenderedItems(for: message.id, with: items) {
+                rebuildRenderedItemsFromMessageCache()
+            }
+        } else {
+            rebuildRenderedItemsFromMessageCache()
         }
-        rebuildRenderedItemsFromMessageCache()
         return true
     }
 
@@ -333,7 +354,14 @@ private extension ChatViewModel {
     }
 
     func rebuildItems(for message: Message) {
-        messageItemsByID[message.id] = makeChatItems(for: message)
+        cacheItems(for: message)
+    }
+
+    @discardableResult
+    func cacheItems(for message: Message) -> [ChatItem] {
+        let items = makeChatItems(for: message)
+        messageItemsByID[message.id] = items
+        return items
     }
 
     func rebuildRenderedItemsFromMessageCache() {
@@ -341,6 +369,24 @@ private extension ChatViewModel {
         currentItemIndexByID = Dictionary(
             uniqueKeysWithValues: renderedItems.enumerated().map { ($1.id, $0) }
         )
+        pruneRenderCachesToCurrentConversation()
+    }
+
+    func replaceRenderedItems(for messageID: UUID, with items: [ChatItem]) -> Bool {
+        guard
+            let firstIndex = renderedItems.firstIndex(where: { $0.messageID == messageID }),
+            let lastIndex = renderedItems.lastIndex(where: { $0.messageID == messageID }),
+            firstIndex <= lastIndex
+        else {
+            return false
+        }
+
+        renderedItems.replaceSubrange(firstIndex...lastIndex, with: items)
+        currentItemIndexByID = Dictionary(
+            uniqueKeysWithValues: renderedItems.enumerated().map { ($1.id, $0) }
+        )
+        pruneRenderCachesToCurrentConversation()
+        return true
     }
 
     func makeChatItems(for message: Message) -> [ChatItem] {
@@ -438,61 +484,22 @@ private extension ChatViewModel {
         forceMarkdown: Bool,
         forcedKind: ChatItem.Kind? = nil
     ) -> [ChatItemDraft] {
-        blocks.enumerated().flatMap { index, block in
-            let key = "\(keyPrefix)-\(block.id.uuidString)-\(index)"
+        var drafts: [ChatItemDraft] = []
+        drafts.reserveCapacity(blocks.count)
 
-            switch block.kind {
-            case .markdown:
-                if forceMarkdown, block.isComplete, forcedKind == nil {
-                    let projectedBlocks = MarkdownBlockProjector.project(block.text)
-                    if !projectedBlocks.isEmpty {
-                        return projectedBlocks.enumerated().map { projectedIndex, projected in
-                            ChatItemDraft(
-                                blockKey: "\(key)-\(projected.keySuffix)-\(projectedIndex)",
-                                kind: projected.kind,
-                                text: projected.text,
-                                copyText: projected.copyText,
-                                layoutVersion: block.version &* 31 &+ projectedIndex &* 7 &+ (block.isComplete ? 1 : 0),
-                                rendersMarkdown: true
-                            )
-                        }
-                    }
-                }
-
-                return [
-                    ChatItemDraft(
-                        blockKey: key,
-                        kind: forcedKind ?? .markdown,
-                        text: block.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "..." : block.text,
-                        copyText: block.text,
-                        layoutVersion: block.version &* 31 &+ (block.isComplete ? 1 : 0),
-                        rendersMarkdown: forceMarkdown && block.isComplete
-                    )
-                ]
-            case .code(let language):
-                return [
-                    ChatItemDraft(
-                        blockKey: key,
-                        kind: .code(language: language),
-                        text: block.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "..." : block.text,
-                        copyText: block.text,
-                        layoutVersion: block.version &* 31 &+ (block.isComplete ? 1 : 0),
-                        rendersMarkdown: false
-                    )
-                ]
-            case .image(let url, let alt):
-                return [
-                    ChatItemDraft(
-                        blockKey: key,
-                        kind: .image(url: url, alt: alt),
-                        text: block.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "..." : block.text,
-                        copyText: "![\(alt ?? "")](\(url))",
-                        layoutVersion: block.version &* 31 &+ (block.isComplete ? 1 : 0),
-                        rendersMarkdown: false
-                    )
-                ]
-            }
+        for (index, block) in blocks.enumerated() {
+            drafts.append(
+                contentsOf: cachedDrafts(
+                    for: block,
+                    index: index,
+                    keyPrefix: keyPrefix,
+                    forceMarkdown: forceMarkdown,
+                    forcedKind: forcedKind
+                )
+            )
         }
+
+        return drafts
     }
 
     func makeStatusDraft(for message: Message) -> ChatItemDraft? {
@@ -526,6 +533,135 @@ private extension ChatViewModel {
             )
         default:
             return nil
+        }
+    }
+
+    func cachedDrafts(
+        for block: MessageBlock,
+        index: Int,
+        keyPrefix: String,
+        forceMarkdown: Bool,
+        forcedKind: ChatItem.Kind?
+    ) -> [ChatItemDraft] {
+        let cacheKey = ContentDraftCacheKey(
+            keyPrefix: keyPrefix,
+            blockID: block.id,
+            blockIndex: index,
+            blockKind: block.kind,
+            blockVersion: block.version,
+            forceMarkdown: forceMarkdown,
+            forcedKind: forcedKind
+        )
+
+        if let cached = contentDraftCache[cacheKey] {
+            return cached
+        }
+
+        let drafts = makeDrafts(
+            for: block,
+            index: index,
+            keyPrefix: keyPrefix,
+            forceMarkdown: forceMarkdown,
+            forcedKind: forcedKind
+        )
+        contentDraftCache[cacheKey] = drafts
+        return drafts
+    }
+
+    func makeDrafts(
+        for block: MessageBlock,
+        index: Int,
+        keyPrefix: String,
+        forceMarkdown: Bool,
+        forcedKind: ChatItem.Kind?
+    ) -> [ChatItemDraft] {
+        let key = "\(keyPrefix)-\(block.id.uuidString)-\(index)"
+        let layoutVersion = block.version &* 31 &+ (block.isComplete ? 1 : 0)
+
+        switch block.kind {
+        case .markdown:
+            if forceMarkdown, block.isComplete, forcedKind == nil {
+                let projectedBlocks = cachedProjectedBlocks(for: block)
+                if !projectedBlocks.isEmpty {
+                    return projectedBlocks.enumerated().map { projectedIndex, projected in
+                        ChatItemDraft(
+                            blockKey: "\(key)-\(projected.keySuffix)-\(projectedIndex)",
+                            kind: projected.kind,
+                            text: projected.text,
+                            copyText: projected.copyText,
+                            layoutVersion: block.version &* 31 &+ projectedIndex &* 7 &+ 1,
+                            rendersMarkdown: true
+                        )
+                    }
+                }
+            }
+
+            return [
+                ChatItemDraft(
+                    blockKey: key,
+                    kind: forcedKind ?? .markdown,
+                    text: displayText(for: block.text),
+                    copyText: block.text,
+                    layoutVersion: layoutVersion,
+                    rendersMarkdown: forceMarkdown && block.isComplete
+                )
+            ]
+        case .code(let language):
+            return [
+                ChatItemDraft(
+                    blockKey: key,
+                    kind: .code(language: language),
+                    text: displayText(for: block.text),
+                    copyText: block.text,
+                    layoutVersion: layoutVersion,
+                    rendersMarkdown: false
+                )
+            ]
+        case .image(let url, let alt):
+            return [
+                ChatItemDraft(
+                    blockKey: key,
+                    kind: .image(url: url, alt: alt),
+                    text: displayText(for: block.text),
+                    copyText: "![\(alt ?? "")](\(url))",
+                    layoutVersion: layoutVersion,
+                    rendersMarkdown: false
+                )
+            ]
+        }
+    }
+
+    func cachedProjectedBlocks(for block: MessageBlock) -> [ProjectedMarkdownBlock] {
+        let cacheKey = MarkdownProjectionCacheKey(blockID: block.id, blockVersion: block.version)
+        if let cached = markdownProjectionCache[cacheKey] {
+            return cached
+        }
+
+        let projectedBlocks = MarkdownBlockProjector.project(block.text)
+        markdownProjectionCache[cacheKey] = projectedBlocks
+        return projectedBlocks
+    }
+
+    func displayText(for text: String) -> String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "..." : text
+    }
+
+    func pruneRenderCachesToCurrentConversation() {
+        var validBlockVersions = Set<MarkdownProjectionCacheKey>()
+        for message in messages {
+            for block in message.blocks {
+                validBlockVersions.insert(MarkdownProjectionCacheKey(blockID: block.id, blockVersion: block.version))
+            }
+            for block in message.reasoningBlocks {
+                validBlockVersions.insert(MarkdownProjectionCacheKey(blockID: block.id, blockVersion: block.version))
+            }
+        }
+
+        markdownProjectionCache = markdownProjectionCache.filter { validBlockVersions.contains($0.key) }
+        contentDraftCache = contentDraftCache.filter { key, _ in
+            validBlockVersions.contains(
+                MarkdownProjectionCacheKey(blockID: key.blockID, blockVersion: key.blockVersion)
+            )
         }
     }
 }

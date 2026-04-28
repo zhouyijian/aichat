@@ -19,7 +19,7 @@ final class StreamingThrottler {
     private let shouldPinToBottom: () -> Bool
     private let onTick: (UUID, Bool) -> Void
 
-    /// interval 默认 80ms
+    /// interval 默认 100ms
     init(
         intervalNs: UInt64 = 100_000_000,
         shouldPinToBottom: @escaping () -> Bool = { false },
