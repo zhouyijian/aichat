@@ -18,7 +18,7 @@ final class ChatViewController: UIViewController {
     // MARK: - Dependencies
     let viewModel = ChatViewModel(repository: LocalConversationRepository())
     private let systemPrompt = "你是一个简洁、专业的中文助手。"
-    private let openAI = OpenAIEventSourceClient(apiKey: "sk-api-ChgdHUf72NG1ZlFM_NvBuZeb7EYw3KsTf_L8enlR-gl4RngF2DgK04kF443WE-DnDpx50S5jkT6kFYgo-uDbjx3UO0wTqF_cfSe-2GM-AOBu40zWfEqwpk4")
+    private let streamClient = StreamingEventSourceClient()
 
     // MARK: - UI
     var collectionView: UICollectionView!
@@ -148,8 +148,8 @@ final class ChatViewController: UIViewController {
         }
     }
     
-    private func startOpenAIStream(history: [[String: String]], assistantID: UUID) {
-        openAI.startStream(
+    private func startAssistantStream(history: [[String: String]], assistantID: UUID) {
+        streamClient.startStream(
             messages: history,
             onDelta: { [weak self] contentDelta, reasoningDelta in
                 guard let self else { return }
@@ -202,7 +202,7 @@ final class ChatViewController: UIViewController {
         isStreaming = true
         updateConversationTitle()
         updateSendButtonState()
-        startOpenAIStream(history: history, assistantID: assistantMsg.id)
+        startAssistantStream(history: history, assistantID: assistantMsg.id)
     }
 
     private func updateSendButtonState() {
@@ -216,7 +216,7 @@ final class ChatViewController: UIViewController {
         if let currentStreamingAssistantID {
             streamingLayoutStates.removeValue(forKey: currentStreamingAssistantID)
         }
-        openAI.stop()
+        streamClient.stop()
         throttler.stop(flushPending: flushPending)
         viewModel.save()
         isStreaming = false

@@ -1,5 +1,5 @@
 //
-//  EventSource.swift
+//  StreamingEventSourceClient.swift
 //  AIChat
 //
 //  Created by 周一见 on 2026/3/3.
@@ -8,7 +8,48 @@
 import Foundation
 import LDSwiftEventSource
 
-private struct OpenAICompatStreamChunk: Decodable {
+struct StreamingServiceConfig {
+    let apiKey: String
+    let endpointURL: URL
+    let model: String
+
+    nonisolated static func loadLocal() throws -> StreamingServiceConfig {
+        guard let url = Bundle.main.url(forResource: "LocalConfig", withExtension: "plist") else {
+            throw StreamingServiceConfigError.missingFile
+        }
+
+        let data = try Data(contentsOf: url)
+        guard
+            let plist = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+            let apiKey = (plist["StreamingAPIKey"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+            !apiKey.isEmpty,
+            let endpoint = (plist["StreamingEndpointURL"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+            let endpointURL = URL(string: endpoint),
+            let model = (plist["StreamingModel"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+            !model.isEmpty
+        else {
+            throw StreamingServiceConfigError.invalidFile
+        }
+
+        return StreamingServiceConfig(apiKey: apiKey, endpointURL: endpointURL, model: model)
+    }
+}
+
+enum StreamingServiceConfigError: LocalizedError {
+    case missingFile
+    case invalidFile
+
+    var errorDescription: String? {
+        switch self {
+        case .missingFile:
+            return "缺少本地配置文件 LocalConfig.plist"
+        case .invalidFile:
+            return "LocalConfig.plist 配置不完整，请检查 StreamingAPIKey、StreamingEndpointURL、StreamingModel"
+        }
+    }
+}
+
+private struct StreamingResponseChunk: Decodable {
     struct Choice: Decodable {
         struct MessageDelta: Decodable {
             let content: String?
@@ -38,7 +79,7 @@ private struct OpenAICompatStreamChunk: Decodable {
     let choices: [Choice]
 }
 
-private struct OpenAICompatErrorEnvelope: Decodable {
+private struct StreamingErrorEnvelope: Decodable {
     struct Err: Decodable {
         let code: String?
         let message: String
@@ -48,53 +89,55 @@ private struct OpenAICompatErrorEnvelope: Decodable {
 }
 
 
-final class OpenAIEventSourceClient {
+final class StreamingEventSourceClient {
 
-    private let apiKey: String
+    private let configProvider: () throws -> StreamingServiceConfig
     private var eventSource: EventSource?
 
-    init(apiKey: String) {
-        self.apiKey = apiKey
+    init(configProvider: @escaping () throws -> StreamingServiceConfig = StreamingServiceConfig.loadLocal) {
+        self.configProvider = configProvider
     }
 
     /// 注意：EventSource.stop() 后不能再 restart（所以每次 stream 都 new 一个 EventSource）
     func startStream(messages: [[String: String]],
-                     model: String = "MiniMax-M2",
+                     model: String? = nil,
                      onDelta: @escaping (_ content: String?, _ reasoning: String?) -> Void,
                      onDone: @escaping () -> Void,
                      onError: @escaping (Error) -> Void) {
 
         stop() // 若之前有连接，先停掉（并 new 一个新的）
 
-        // MiniMax OpenAI 兼容域名：api.minimaxi.com
-        let url = URL(string: "https://api.minimaxi.com/v1/chat/completions")!
+        let config: StreamingServiceConfig
+        do {
+            config = try configProvider()
+        } catch {
+            onError(error)
+            return
+        }
 
-        // 1) 组装请求 body（OpenAI chat.completions 兼容格式）
         let bodyObj: [String: Any] = [
-            "model": model,
+            "model": model ?? config.model,
             "stream": true,
             "messages": messages
         ]
         let body = try? JSONSerialization.data(withJSONObject: bodyObj)
 
-        // 2) 事件处理器：收 data（messageEvent.data）→ JSON decode → delta/done
-        let handler = Handler(
+        let handler = StreamingEventHandler(
             onDelta: onDelta,
             onDone: onDone,
             onError: onError
         )
 
-        // 3) Config：method/body/headers
-        var config = EventSource.Config(handler: handler, url: url)
-        config.method = "POST"
-        config.body = body
-        config.headers = [
-            "Authorization": "Bearer \(apiKey)",
+        var eventSourceConfig = EventSource.Config(handler: handler, url: config.endpointURL)
+        eventSourceConfig.method = "POST"
+        eventSourceConfig.body = body
+        eventSourceConfig.headers = [
+            "Authorization": "Bearer \(config.apiKey)",
             "Content-Type": "application/json",
             "Accept": "text/event-stream"
         ]
 
-        let es = EventSource(config: config)
+        let es = EventSource(config: eventSourceConfig)
         self.eventSource = es
         es.start()
     }
@@ -105,7 +148,7 @@ final class OpenAIEventSourceClient {
     }
 }
 
-private final class Handler: EventHandler {
+private final class StreamingEventHandler: EventHandler {
 
     private let onDelta: (_ content: String?, _ reasoning: String?) -> Void
     private let onDone: () -> Void
@@ -138,7 +181,6 @@ private final class Handler: EventHandler {
             return
         }
 
-        // OpenAI 兼容流结束标记
         if dataStr == "[DONE]" {
             emitDoneIfNeeded()
             return
@@ -146,10 +188,9 @@ private final class Handler: EventHandler {
 
         guard let data = dataStr.data(using: .utf8) else { return }
 
-        // 先处理 error envelope
-        if let env = try? JSONDecoder().decode(OpenAICompatErrorEnvelope.self, from: data) {
+        if let env = try? JSONDecoder().decode(StreamingErrorEnvelope.self, from: data) {
             let nsError = NSError(
-                domain: "MiniMax",
+                domain: "StreamingService",
                 code: 1,
                 userInfo: [NSLocalizedDescriptionKey: env.error.message]
             )
@@ -157,8 +198,7 @@ private final class Handler: EventHandler {
             return
         }
 
-        // 再处理 chat.completions stream chunk
-        if let chunk = try? JSONDecoder().decode(OpenAICompatStreamChunk.self, from: data),
+        if let chunk = try? JSONDecoder().decode(StreamingResponseChunk.self, from: data),
            let first = chunk.choices.first {
             let delta = first.delta ?? first.message
 

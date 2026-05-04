@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>StreamingAPIKey</key>
+	<string>YOUR_API_KEY</string>
+	<key>StreamingEndpointURL</key>
+	<string>https://api.minimaxi.com/v1/chat/completions</string>
+	<key>StreamingModel</key>
+	<string>MiniMax-M2</string>
+</dict>
+</plist>

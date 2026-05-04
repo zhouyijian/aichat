@@ -13,3 +13,6 @@ xcuserdata/
 
 # Logs
 *.log
+
+# Local secrets
+AIChat/Config/LocalConfig.plist
