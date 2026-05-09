@@ -122,6 +122,18 @@ extension ChatViewModel {
 
         return parts.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
+
+    func latestContinuableAssistantID() -> UUID? {
+        for message in messages.reversed() {
+            if message.role == .assistant, message.status == .needsContinuation {
+                return message.id
+            }
+            if message.role == .user {
+                return nil
+            }
+        }
+        return nil
+    }
 }
 
 // MARK: - Conversation Operations
@@ -165,18 +177,17 @@ extension ChatViewModel {
         return true
     }
 
-    func chatHistoryForRequest(systemPrompt: String) -> [[String: String]] {
-        var result: [[String: String]] = [
-            ["role": "system", "content": systemPrompt]
-        ]
+    func chatProviderRequest(systemPrompt: String) -> ChatProviderRequest {
+        var requestMessages: [ChatProviderMessage] = []
 
         for message in messages {
             guard let role = apiRole(from: message.role),
                   let content = normalizedHistoryContent(from: message),
                   !content.isEmpty else { continue }
-            result.append(["role": role, "content": content])
+            requestMessages.append(ChatProviderMessage(role: role, content: content))
         }
-        return result
+
+        return ChatProviderRequest(systemPrompt: systemPrompt, messages: requestMessages)
     }
 
     func save() {
@@ -257,7 +268,7 @@ extension ChatViewModel {
             if let contentDelta, !contentDelta.isEmpty {
                 ThinkTagContentRouter.append(contentDelta, to: &message)
             }
-            if message.status != .streaming {
+            if !message.status.isTerminal, message.status != .streaming {
                 message.status = .streaming
             }
             message.advanceLayoutVersion()
@@ -299,6 +310,16 @@ extension ChatViewModel {
             }
             message.advanceLayoutVersion()
         }
+    }
+
+    @discardableResult
+    func incrementMaxTokenHitCount(for id: UUID) -> Int {
+        var count = 0
+        _ = updateMessage(id: id, persist: false) { message in
+            count = (message.maxTokenHitCount ?? 0) + 1
+            message.maxTokenHitCount = count
+        }
+        return count
     }
 }
 
@@ -414,6 +435,8 @@ private extension ChatViewModel {
                 copyText: draft.copyText,
                 layoutVersion: draft.layoutVersion,
                 rendersMarkdown: draft.rendersMarkdown,
+                previousKind: index > 0 ? drafts[index - 1].kind : nil,
+                nextKind: index + 1 < drafts.count ? drafts[index + 1].kind : nil,
                 isFirstInMessage: index == 0,
                 isLastInMessage: index == drafts.count - 1
             )
@@ -495,7 +518,7 @@ private extension ChatViewModel {
                     keyPrefix: keyPrefix,
                     forceMarkdown: forceMarkdown,
                     forcedKind: forcedKind
-                )
+                ).filter(isRenderableDraft)
             )
         }
 
@@ -527,6 +550,15 @@ private extension ChatViewModel {
                 blockKey: "status",
                 kind: .status,
                 text: "生成失败：\(reason)",
+                copyText: "",
+                layoutVersion: message.layoutVersion,
+                rendersMarkdown: false
+            )
+        case .needsContinuation:
+            return ChatItemDraft(
+                blockKey: "continue-generation",
+                kind: .control(action: .continueGeneration),
+                text: "继续生成",
                 copyText: "",
                 layoutVersion: message.layoutVersion,
                 rendersMarkdown: false
@@ -583,8 +615,8 @@ private extension ChatViewModel {
             if forceMarkdown, block.isComplete, forcedKind == nil {
                 let projectedBlocks = cachedProjectedBlocks(for: block)
                 if !projectedBlocks.isEmpty {
-                    return projectedBlocks.enumerated().map { projectedIndex, projected in
-                        ChatItemDraft(
+                    let drafts = projectedBlocks.enumerated().compactMap { projectedIndex, projected in
+                        let draft = ChatItemDraft(
                             blockKey: "\(key)-\(projected.keySuffix)-\(projectedIndex)",
                             kind: projected.kind,
                             text: projected.text,
@@ -592,10 +624,15 @@ private extension ChatViewModel {
                             layoutVersion: block.version &* 31 &+ projectedIndex &* 7 &+ 1,
                             rendersMarkdown: true
                         )
+                        return isRenderableDraft(draft) ? draft : nil
+                    }
+                    if !drafts.isEmpty {
+                        return drafts
                     }
                 }
             }
 
+            guard hasRenderableText(block.text) else { return [] }
             return [
                 ChatItemDraft(
                     blockKey: key,
@@ -607,11 +644,24 @@ private extension ChatViewModel {
                 )
             ]
         case .code(let language):
+            if language == nil,
+               block.isComplete,
+               let recoveredDrafts = recoverMarkdownDraftsFromPlainCodeBlock(
+                block: block,
+                key: key,
+                layoutVersion: layoutVersion,
+                forceMarkdown: forceMarkdown
+               ) {
+                return recoveredDrafts
+            }
+
+            let trimmedCode = block.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard hasRenderableText(trimmedCode) else { return [] }
             return [
                 ChatItemDraft(
                     blockKey: key,
                     kind: .code(language: language),
-                    text: displayText(for: block.text),
+                    text: trimmedCode,
                     copyText: block.text,
                     layoutVersion: layoutVersion,
                     rendersMarkdown: false
@@ -631,6 +681,143 @@ private extension ChatViewModel {
         }
     }
 
+    func recoverMarkdownDraftsFromPlainCodeBlock(
+        block: MessageBlock,
+        key: String,
+        layoutVersion: Int,
+        forceMarkdown: Bool
+    ) -> [ChatItemDraft]? {
+        guard let headingRange = firstRecoverableMarkdownHeadingLine(in: block.text) else {
+            return nil
+        }
+
+        let codePrefix = String(block.text[..<headingRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let markdownSuffix = String(block.text[headingRange.lowerBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard hasRenderableText(markdownSuffix),
+              looksLikeRecoveredMarkdownSuffix(markdownSuffix)
+        else { return nil }
+
+        var drafts: [ChatItemDraft] = []
+        if hasRenderableText(codePrefix) {
+            drafts.append(
+                ChatItemDraft(
+                    blockKey: "\(key)-recovered-code",
+                    kind: .code(language: nil),
+                    text: codePrefix,
+                    copyText: codePrefix,
+                    layoutVersion: layoutVersion,
+                    rendersMarkdown: false
+                )
+            )
+        }
+
+        let projectedBlocks = MarkdownBlockProjector.project(markdownSuffix)
+        if projectedBlocks.isEmpty {
+            drafts.append(
+                ChatItemDraft(
+                    blockKey: "\(key)-recovered-markdown",
+                    kind: .markdown,
+                    text: displayText(for: markdownSuffix),
+                    copyText: markdownSuffix,
+                    layoutVersion: layoutVersion &+ 1,
+                    rendersMarkdown: forceMarkdown
+                )
+            )
+        } else {
+            drafts.append(
+                contentsOf: projectedBlocks.enumerated().compactMap { projectedIndex, projected in
+                    let draft = ChatItemDraft(
+                        blockKey: "\(key)-recovered-\(projected.keySuffix)-\(projectedIndex)",
+                        kind: projected.kind,
+                        text: projected.text,
+                        copyText: projected.copyText,
+                        layoutVersion: layoutVersion &+ projectedIndex &+ 1,
+                        rendersMarkdown: forceMarkdown
+                    )
+                    return isRenderableDraft(draft) ? draft : nil
+                }
+            )
+        }
+
+        return drafts.isEmpty ? nil : drafts
+    }
+
+    func firstRecoverableMarkdownHeadingLine(in text: String) -> Range<String.Index>? {
+        var searchStart = text.startIndex
+
+        while searchStart < text.endIndex {
+            let lineEnd = text[searchStart...].firstIndex(of: "\n") ?? text.endIndex
+            let line = String(text[searchStart..<lineEnd])
+            if isRecoverableMarkdownHeadingLine(line) {
+                return searchStart..<lineEnd
+            }
+            guard lineEnd < text.endIndex else { break }
+            searchStart = text.index(after: lineEnd)
+        }
+
+        return nil
+    }
+
+    func isRecoverableMarkdownHeadingLine(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        let candidate: String
+        if trimmed.hasPrefix("---") {
+            candidate = String(trimmed.drop { $0 == "-" }).trimmingCharacters(in: .whitespaces)
+        } else {
+            candidate = trimmed
+        }
+
+        guard candidate.hasPrefix("##") else { return false }
+        let marker = candidate.prefix { $0 == "#" }
+        guard (2...6).contains(marker.count),
+              candidate.count > marker.count
+        else {
+            return false
+        }
+
+        let bodyStart = candidate.index(candidate.startIndex, offsetBy: marker.count)
+        return candidate[bodyStart].isWhitespace
+    }
+
+    func looksLikeRecoveredMarkdownSuffix(_ suffix: String) -> Bool {
+        let lines = suffix.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        guard lines.first.map(isRecoverableMarkdownHeadingLine) == true else { return false }
+
+        for line in lines.dropFirst().prefix(8) {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+
+            if isRecoverableMarkdownHeadingLine(trimmed)
+                || trimmed.hasPrefix("|")
+                || trimmed.hasPrefix("- ")
+                || trimmed.hasPrefix("* ")
+                || trimmed.hasPrefix("> ")
+                || trimmed.hasPrefix("```")
+                || trimmed.hasPrefix("![") {
+                return true
+            }
+
+            if !looksLikeSourceCodeLine(trimmed),
+               trimmed.rangeOfCharacter(from: CharacterSet(charactersIn: "，。；：,.!?")) != nil {
+                return true
+            }
+        }
+
+        return false
+    }
+
+    func looksLikeSourceCodeLine(_ line: String) -> Bool {
+        let sourcePrefixes = ["//", "#!", "/*", "* ", "*/", "let ", "var ", "func ", "class ", "struct ", "import ", "echo ", "if ", "for ", "while "]
+        if sourcePrefixes.contains(where: { line.hasPrefix($0) }) {
+            return true
+        }
+
+        return line.contains("{")
+            || line.contains("}")
+            || line.contains("=")
+            || line.hasSuffix(";")
+    }
+
     func cachedProjectedBlocks(for block: MessageBlock) -> [ProjectedMarkdownBlock] {
         let cacheKey = MarkdownProjectionCacheKey(blockID: block.id, blockVersion: block.version)
         if let cached = markdownProjectionCache[cacheKey] {
@@ -644,6 +831,39 @@ private extension ChatViewModel {
 
     func displayText(for text: String) -> String {
         text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "..." : text
+    }
+
+    func isRenderableDraft(_ draft: ChatItemDraft) -> Bool {
+        switch draft.kind {
+        case .image, .control, .status:
+            return true
+        case .markdown, .heading, .quote, .list, .table, .code, .reasoning:
+            return hasRenderableText(draft.text)
+        }
+    }
+
+    func hasRenderableText(_ text: String) -> Bool {
+        text.unicodeScalars.contains { scalar in
+            guard !CharacterSet.whitespacesAndNewlines.contains(scalar),
+                  !CharacterSet.controlCharacters.contains(scalar)
+            else {
+                return false
+            }
+
+            switch scalar.value {
+            case 0x00AD, // soft hyphen
+                 0x034F, // combining grapheme joiner
+                 0x061C, // Arabic letter mark
+                 0x180E, // Mongolian vowel separator
+                 0x200B...0x200F, // zero-width and bidi marks
+                 0x202A...0x202E, // bidi embeddings and overrides
+                 0x2060...0x206F, // word joiner and invisible formatting
+                 0xFEFF: // zero-width no-break space
+                return false
+            default:
+                return true
+            }
+        }
     }
 
     func pruneRenderCachesToCurrentConversation() {
@@ -691,12 +911,12 @@ private extension ChatViewModel {
         return "还没有消息"
     }
 
-    func apiRole(from role: Role) -> String? {
+    func apiRole(from role: Role) -> ChatProviderMessage.Role? {
         switch role {
         case .user:
-            return "user"
+            return .user
         case .assistant:
-            return "assistant"
+            return .assistant
         case .system:
             return nil
         }

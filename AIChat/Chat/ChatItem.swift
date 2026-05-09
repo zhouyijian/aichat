@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 nonisolated enum TableColumnAlignment: Hashable, Sendable {
@@ -31,6 +32,7 @@ nonisolated struct ChatItem: Hashable, Sendable {
 
     nonisolated enum Action: Hashable, Sendable {
         case toggleReasoning
+        case continueGeneration
     }
 
     let id: ID
@@ -41,11 +43,89 @@ nonisolated struct ChatItem: Hashable, Sendable {
     let copyText: String
     let layoutVersion: Int
     let rendersMarkdown: Bool
+    let previousKind: Kind?
+    let nextKind: Kind?
     let isFirstInMessage: Bool
     let isLastInMessage: Bool
 
     var isCopyable: Bool {
         !copyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var outerTopSpacing: CGFloat {
+        switch role {
+        case .user, .system:
+            return isFirstInMessage ? 6 : 2
+        case .assistant:
+            return assistantTopSpacing
+        }
+    }
+
+    var outerBottomSpacing: CGFloat {
+        switch role {
+        case .user, .system:
+            return isLastInMessage ? 6 : 2
+        case .assistant:
+            return isLastInMessage ? 8 : 0
+        }
+    }
+
+    var outerVerticalPadding: CGFloat {
+        outerTopSpacing + outerBottomSpacing
+    }
+
+    private var assistantTopSpacing: CGFloat {
+        guard !isFirstInMessage, let previousKind else {
+            return 6
+        }
+
+        if let level = Self.headingLevel(for: kind) {
+            if Self.isHeading(previousKind) {
+                return level <= 2 ? 10 : 8
+            }
+            if Self.isLargeBlock(previousKind) {
+                return level <= 2 ? 14 : 12
+            }
+            return level <= 2 ? 16 : 12
+        }
+
+        if Self.isLargeBlock(kind) {
+            return Self.isHeading(previousKind) ? 8 : 10
+        }
+
+        if Self.isLargeBlock(previousKind) {
+            return 10
+        }
+
+        if Self.isHeading(previousKind) {
+            return 6
+        }
+
+        if case .quote = kind {
+            return 6
+        }
+
+        return 4
+    }
+
+    private static func headingLevel(for kind: Kind) -> Int? {
+        if case .heading(let level) = kind {
+            return level
+        }
+        return nil
+    }
+
+    private static func isHeading(_ kind: Kind) -> Bool {
+        headingLevel(for: kind) != nil
+    }
+
+    private static func isLargeBlock(_ kind: Kind) -> Bool {
+        switch kind {
+        case .table, .code, .image, .reasoning:
+            return true
+        default:
+            return false
+        }
     }
 }
 
@@ -186,6 +266,9 @@ enum MarkdownBlockWriter {
     ) -> Bool {
         let text = blocks[index].text
         guard let closingRange = text.range(of: "\n```") ?? text.range(of: "```") else {
+            if recoverMarkdownSuffixFromPlainCodeBlock(in: &blocks, at: index, forceComplete: forceComplete) {
+                return true
+            }
             if forceComplete {
                 blocks[index].isComplete = true
             }
@@ -286,6 +369,118 @@ enum MarkdownBlockWriter {
             return text.index(after: nextLine)
         }
         return closingRange.upperBound
+    }
+
+    private static func recoverMarkdownSuffixFromPlainCodeBlock(
+        in blocks: inout [MessageBlock],
+        at index: Int,
+        forceComplete: Bool
+    ) -> Bool {
+        guard forceComplete else { return false }
+        guard case .code(let language) = blocks[index].kind,
+              language == nil
+        else {
+            return false
+        }
+
+        let text = blocks[index].text
+        guard let headingRange = firstRecoverableMarkdownHeadingLine(in: text) else {
+            return false
+        }
+
+        if headingRange.lowerBound == text.startIndex {
+            blocks[index].kind = .markdown
+            blocks[index].isComplete = forceComplete
+            blocks[index].version &+= 1
+            return true
+        }
+
+        let code = String(text[..<headingRange.lowerBound]).trimmingCharacters(in: .newlines)
+        let suffix = String(text[headingRange.lowerBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !code.isEmpty,
+              !suffix.isEmpty,
+              looksLikeRecoveredMarkdownSuffix(suffix)
+        else { return false }
+
+        blocks[index].replaceText(code, isComplete: true)
+        blocks.insert(MessageBlock(kind: .markdown, text: suffix, isComplete: forceComplete), at: index + 1)
+        return true
+    }
+
+    private static func firstRecoverableMarkdownHeadingLine(in text: String) -> Range<String.Index>? {
+        var searchStart = text.startIndex
+
+        while searchStart < text.endIndex {
+            let lineEnd = text[searchStart...].firstIndex(of: "\n") ?? text.endIndex
+            let line = String(text[searchStart..<lineEnd])
+            if isRecoverableMarkdownHeadingLine(line) {
+                return searchStart..<lineEnd
+            }
+            guard lineEnd < text.endIndex else { break }
+            searchStart = text.index(after: lineEnd)
+        }
+
+        return nil
+    }
+
+    private static func isRecoverableMarkdownHeadingLine(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        let candidate: String
+        if trimmed.hasPrefix("---") {
+            candidate = String(trimmed.drop { $0 == "-" }).trimmingCharacters(in: .whitespaces)
+        } else {
+            candidate = trimmed
+        }
+
+        guard candidate.hasPrefix("##") else { return false }
+        let marker = candidate.prefix { $0 == "#" }
+        guard (2...6).contains(marker.count),
+              candidate.count > marker.count
+        else {
+            return false
+        }
+
+        let bodyStart = candidate.index(candidate.startIndex, offsetBy: marker.count)
+        return candidate[bodyStart].isWhitespace
+    }
+
+    private static func looksLikeRecoveredMarkdownSuffix(_ suffix: String) -> Bool {
+        let lines = suffix.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        guard lines.first.map(isRecoverableMarkdownHeadingLine) == true else { return false }
+
+        for line in lines.dropFirst().prefix(8) {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+
+            if isRecoverableMarkdownHeadingLine(trimmed)
+                || trimmed.hasPrefix("|")
+                || trimmed.hasPrefix("- ")
+                || trimmed.hasPrefix("* ")
+                || trimmed.hasPrefix("> ")
+                || trimmed.hasPrefix("```")
+                || trimmed.hasPrefix("![") {
+                return true
+            }
+
+            if !looksLikeSourceCodeLine(trimmed),
+               trimmed.rangeOfCharacter(from: CharacterSet(charactersIn: "，。；：,.!?")) != nil {
+                return true
+            }
+        }
+
+        return false
+    }
+
+    private static func looksLikeSourceCodeLine(_ line: String) -> Bool {
+        let sourcePrefixes = ["//", "#!", "/*", "* ", "*/", "let ", "var ", "func ", "class ", "struct ", "import ", "echo ", "if ", "for ", "while "]
+        if sourcePrefixes.contains(where: { line.hasPrefix($0) }) {
+            return true
+        }
+
+        return line.contains("{")
+            || line.contains("}")
+            || line.contains("=")
+            || line.hasSuffix(";")
     }
 
     private struct MarkdownImageMatch {

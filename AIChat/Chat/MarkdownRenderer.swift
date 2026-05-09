@@ -30,10 +30,35 @@ enum MarkdownRenderer {
         return attributed
     }
 
+    static func tableCellAttributedString(
+        from markdown: String,
+        baseFont: UIFont,
+        textColor: UIColor,
+        alignment: NSTextAlignment
+    ) -> NSAttributedString {
+        let style = paragraphStyle(for: baseFont, paragraphSpacing: 0)
+        if let mutableStyle = style.mutableCopy() as? NSMutableParagraphStyle {
+            mutableStyle.alignment = alignment
+            return inlineAttributedString(
+                from: markdown.isEmpty ? " " : markdown,
+                baseFont: baseFont,
+                textColor: textColor,
+                paragraphStyle: mutableStyle
+            )
+        }
+
+        return inlineAttributedString(
+            from: markdown.isEmpty ? " " : markdown,
+            baseFont: baseFont,
+            textColor: textColor,
+            paragraphStyle: style
+        )
+    }
+
     private static func cacheKey(for text: String, baseFont: UIFont, textColor: UIColor) -> NSString {
         let fontKey = "\(baseFont.fontName)-\(baseFont.pointSize)"
         let colorKey = textColor.resolvedColor(with: .current).description
-        return "chat-md-v2|\(fontKey)|\(colorKey)|\(text)" as NSString
+        return "chat-md-v3|\(fontKey)|\(colorKey)|\(text)" as NSString
     }
 
     private static func renderBlocksPreservingLineBreaks(
@@ -116,14 +141,14 @@ enum MarkdownRenderer {
             return BlockStyle(
                 text: heading.text,
                 font: font,
-                paragraphStyle: paragraphStyle(for: font, paragraphSpacing: max(8, font.pointSize * 0.45))
+                paragraphStyle: paragraphStyle(for: font, paragraphSpacing: 0)
             )
         }
 
         return BlockStyle(
             text: line,
             font: baseFont,
-            paragraphStyle: paragraphStyle(for: baseFont, paragraphSpacing: max(6, baseFont.pointSize * 0.35))
+            paragraphStyle: paragraphStyle(for: baseFont, paragraphSpacing: 0)
         )
     }
 
@@ -164,6 +189,7 @@ enum MarkdownRenderer {
 
     private static func paragraphStyle(for font: UIFont, paragraphSpacing: CGFloat) -> NSParagraphStyle {
         let style = NSMutableParagraphStyle()
+        style.lineBreakMode = .byCharWrapping
         style.lineSpacing = 2
         style.paragraphSpacing = paragraphSpacing
         style.paragraphSpacingBefore = 0
@@ -178,7 +204,6 @@ enum MarkdownRenderer {
 
             if rawValue & 4 != 0 {
                 attributed.addAttribute(.font, value: UIFont.monospacedSystemFont(ofSize: baseFont.pointSize, weight: .regular), range: range)
-                attributed.addAttribute(.backgroundColor, value: UIColor.tertiarySystemFill, range: range)
             } else {
                 attributed.addAttribute(.font, value: font(for: rawValue, baseFont: baseFont), range: range)
             }

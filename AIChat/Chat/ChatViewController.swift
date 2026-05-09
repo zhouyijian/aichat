@@ -17,8 +17,18 @@ final class ChatViewController: UIViewController {
 
     // MARK: - Dependencies
     let viewModel = ChatViewModel(repository: LocalConversationRepository())
-    private let systemPrompt = "你是一个简洁、专业的中文助手。"
-    private let streamClient = StreamingEventSourceClient()
+    private let systemPrompt = "你是一个简洁、专业的中文助手。数据表格、对比表、参数表必须使用标准 Markdown 表格。需要画流程、结构、时间线、坐标、层级等示意图时，可以使用 ASCII diagram，但必须放在代码块中。不要用 ASCII/框线图模拟数据表格。"
+    private let streamClient = MiniMaxAnthropicStreamingClient()
+    private let maxTokenHitsBeforeManualContinuation = 3
+    private lazy var streamTextAnimator = StreamingTextAnimator { [weak self] id, contentDelta, reasoningDelta in
+        guard let self else { return }
+        self.viewModel.appendStreamDelta(
+            to: id,
+            contentDelta: contentDelta,
+            reasoningDelta: reasoningDelta
+        )
+        self.throttler.markChanged(id: id)
+    }
 
     // MARK: - UI
     var collectionView: UICollectionView!
@@ -31,6 +41,7 @@ final class ChatViewController: UIViewController {
     private let sendButton = UIButton(type: .system)
     private var inputTextHeightConstraint: Constraint?
     private var currentStreamingAssistantID: UUID?
+    private var continuationPrefixFilters: [UUID: StreamingContinuationPrefixFilter] = [:]
     var streamingLayoutStates: [UUID: StreamingLayoutState] = [:]
 
     lazy var throttler = StreamingThrottler(
@@ -98,6 +109,13 @@ final class ChatViewController: UIViewController {
         adjustInputHeightIfNeeded()
     }
 
+    override func viewSafeAreaInsetsDidChange() {
+        super.viewSafeAreaInsetsDidChange()
+        viewModel.invalidateAllHeights()
+        collectionView?.collectionViewLayout.invalidateLayout()
+        updateScrollToBottomButtonVisibility()
+    }
+
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
         stopCurrentStream(flushPending: false)
@@ -148,23 +166,50 @@ final class ChatViewController: UIViewController {
         }
     }
     
-    private func startAssistantStream(history: [[String: String]], assistantID: UUID) {
+    private func startAssistantStream(request: ChatProviderRequest, assistantID: UUID) {
         streamClient.startStream(
-            messages: history,
+            request: request,
             onDelta: { [weak self] contentDelta, reasoningDelta in
                 guard let self else { return }
                 Task { @MainActor in
-                    self.viewModel.appendStreamDelta(
-                        to: assistantID,
-                        contentDelta: contentDelta,
+                    let filteredContentDelta = self.filteredContinuationContentDelta(
+                        contentDelta,
+                        assistantID: assistantID
+                    )
+                    guard filteredContentDelta?.isEmpty == false || reasoningDelta?.isEmpty == false else {
+                        return
+                    }
+                    self.streamTextAnimator.enqueue(
+                        id: assistantID,
+                        contentDelta: filteredContentDelta,
                         reasoningDelta: reasoningDelta
                     )
-                    self.throttler.markChanged(id: assistantID)
                 }
             },
-            onDone: { [weak self] in
+            onDone: { [weak self] finishReason in
                 guard let self else { return }
                 Task { @MainActor in
+                    if finishReason == .maxTokens {
+                        self.flushContinuationPrefixFilterIfNeeded(for: assistantID)
+                        self.streamTextAnimator.flush(id: assistantID)
+                        let maxTokenHitCount = self.viewModel.incrementMaxTokenHitCount(for: assistantID)
+                        if !self.shouldShowManualContinuationButton(afterMaxTokenHitCount: maxTokenHitCount) {
+                            self.updateMessageUI(id: assistantID, shouldPinToBottom: true)
+                            self.viewModel.save()
+                            let request = self.makeContinuationRequest()
+                            self.prepareContinuationPrefixFilter(for: assistantID)
+                            self.startAssistantStream(request: request, assistantID: assistantID)
+                        } else {
+                            self.viewModel.setStatus(for: assistantID, status: .needsContinuation)
+                            self.updateMessageUI(id: assistantID, shouldPinToBottom: true)
+                            self.viewModel.save()
+                            self.stopCurrentStream(flushPending: true)
+                        }
+                        return
+                    }
+
+                    self.flushContinuationPrefixFilterIfNeeded(for: assistantID)
+                    await self.streamTextAnimator.drain(id: assistantID)
                     self.viewModel.setStatus(for: assistantID, status: .success)
                     self.updateMessageUI(id: assistantID, shouldPinToBottom: false)
                     self.viewModel.save()
@@ -174,6 +219,8 @@ final class ChatViewController: UIViewController {
             onError: { [weak self] error in
                 guard let self else { return }
                 Task { @MainActor in
+                    self.continuationPrefixFilters.removeValue(forKey: assistantID)
+                    self.streamTextAnimator.flush(id: assistantID)
                     let currentText = self.viewModel.message(id: assistantID)?.contentText ?? ""
                     let message = currentText.isEmpty ? "❌ \(error.localizedDescription)" : "\(currentText)\n\n❌ \(error.localizedDescription)"
                     self.viewModel.setContent(for: assistantID, text: message)
@@ -190,10 +237,16 @@ final class ChatViewController: UIViewController {
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !isStreaming else { return }
 
+        if isContinuePrompt(trimmed),
+           let assistantID = viewModel.latestContinuableAssistantID() {
+            continueGeneration(for: assistantID)
+            return
+        }
+
         let userMsg = Message(role: .user, content: trimmed)
         appendMessage(userMsg, scrollToBottom: true)
 
-        let history = viewModel.chatHistoryForRequest(systemPrompt: systemPrompt)
+        let request = viewModel.chatProviderRequest(systemPrompt: systemPrompt)
 
         let assistantMsg = Message(role: .assistant, content: "", status: .pending)
         appendMessage(assistantMsg, scrollToBottom: true)
@@ -202,7 +255,7 @@ final class ChatViewController: UIViewController {
         isStreaming = true
         updateConversationTitle()
         updateSendButtonState()
-        startAssistantStream(history: history, assistantID: assistantMsg.id)
+        startAssistantStream(request: request, assistantID: assistantMsg.id)
     }
 
     private func updateSendButtonState() {
@@ -214,6 +267,13 @@ final class ChatViewController: UIViewController {
 
     private func stopCurrentStream(flushPending: Bool) {
         if let currentStreamingAssistantID {
+            if flushPending {
+                flushContinuationPrefixFilterIfNeeded(for: currentStreamingAssistantID)
+                streamTextAnimator.flush(id: currentStreamingAssistantID)
+            } else {
+                continuationPrefixFilters.removeValue(forKey: currentStreamingAssistantID)
+                streamTextAnimator.discard(id: currentStreamingAssistantID)
+            }
             streamingLayoutStates.removeValue(forKey: currentStreamingAssistantID)
         }
         streamClient.stop()
@@ -224,12 +284,97 @@ final class ChatViewController: UIViewController {
         updateSendButtonState()
     }
 
+    private func shouldShowManualContinuationButton(afterMaxTokenHitCount count: Int) -> Bool {
+        count > 0 && count.isMultiple(of: maxTokenHitsBeforeManualContinuation)
+    }
+
+    private func prepareContinuationPrefixFilter(for assistantID: UUID) {
+        guard let existingText = viewModel.message(id: assistantID)?.contentText,
+              !existingText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            continuationPrefixFilters.removeValue(forKey: assistantID)
+            return
+        }
+
+        continuationPrefixFilters[assistantID] = StreamingContinuationPrefixFilter(existingText: existingText)
+    }
+
+    private func filteredContinuationContentDelta(_ contentDelta: String?, assistantID: UUID) -> String? {
+        guard let contentDelta else { return nil }
+        guard let filter = continuationPrefixFilters[assistantID] else { return contentDelta }
+
+        let filteredDelta = filter.consume(contentDelta)
+        if filter.isResolved {
+            continuationPrefixFilters.removeValue(forKey: assistantID)
+        }
+        return filteredDelta
+    }
+
+    private func flushContinuationPrefixFilterIfNeeded(for assistantID: UUID) {
+        guard let filter = continuationPrefixFilters.removeValue(forKey: assistantID),
+              let contentDelta = filter.flush(),
+              !contentDelta.isEmpty
+        else {
+            return
+        }
+
+        streamTextAnimator.enqueue(
+            id: assistantID,
+            contentDelta: contentDelta,
+            reasoningDelta: nil
+        )
+    }
+
+    private func makeContinuationRequest() -> ChatProviderRequest {
+        let baseRequest = viewModel.chatProviderRequest(systemPrompt: systemPrompt)
+        let continuationPrompt = """
+        请从你上一条 assistant 回复的最后一个字符之后继续输出。
+        不要重复已经输出过的任何标题、段落、表格行、代码块或最后一句话。
+        不要重写开头，不要解释原因，直接续写未完成内容。
+        如果正在输出数据表格、对比表或参数表，请使用标准 Markdown 表格语法。
+        如果正在输出流程、结构、时间线、坐标或层级示意图，可以使用 ASCII diagram，但必须放在代码块中。
+        不要用 ASCII/框线图模拟数据表格。
+        """
+        return ChatProviderRequest(
+            systemPrompt: baseRequest.systemPrompt,
+            messages: baseRequest.messages + [
+                ChatProviderMessage(role: .user, content: continuationPrompt)
+            ]
+        )
+    }
+
     private func cancelCurrentStream() {
         guard isStreaming, let assistantID = currentStreamingAssistantID else { return }
+        stopCurrentStream(flushPending: true)
         viewModel.setStatus(for: assistantID, status: .canceled)
         streamingLayoutStates.removeValue(forKey: assistantID)
         updateMessageUI(id: assistantID, shouldPinToBottom: false)
-        stopCurrentStream(flushPending: true)
+        viewModel.save()
+    }
+
+    func continueGeneration(for assistantID: UUID) {
+        guard !isStreaming,
+              viewModel.message(id: assistantID)?.status == .needsContinuation
+        else {
+            return
+        }
+
+        let request = makeContinuationRequest()
+
+        currentStreamingAssistantID = assistantID
+        isStreaming = true
+        viewModel.setStatus(for: assistantID, status: .streaming)
+        updateMessageUI(id: assistantID, shouldPinToBottom: true)
+        updateSendButtonState()
+        prepareContinuationPrefixFilter(for: assistantID)
+        startAssistantStream(request: request, assistantID: assistantID)
+    }
+
+    private func isContinuePrompt(_ text: String) -> Bool {
+        let normalized = text
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return ["继续", "继续生成", "续写", "continue"].contains(normalized)
     }
 
     private func updateConversationTitle() {
@@ -315,7 +460,8 @@ extension ChatViewController {
         view.addSubview(collectionView)
 
         collectionView.snp.makeConstraints { make in
-            make.top.leading.trailing.equalToSuperview()
+            make.top.equalTo(view.safeAreaLayoutGuide.snp.top)
+            make.leading.trailing.equalTo(view.safeAreaLayoutGuide)
             make.bottom.equalTo(inputContainerView.snp.top)
         }
     }
@@ -370,13 +516,13 @@ extension ChatViewController {
         }
 
         sendButton.snp.makeConstraints { make in
-            make.trailing.equalToSuperview().inset(12)
+            make.trailing.equalTo(view.safeAreaLayoutGuide).inset(12)
             make.bottom.equalTo(inputContainerView.safeAreaLayoutGuide).inset(10)
             make.width.greaterThanOrEqualTo(64)
         }
 
         inputBackgroundView.snp.makeConstraints { make in
-            make.leading.equalToSuperview().offset(12)
+            make.leading.equalTo(view.safeAreaLayoutGuide).offset(12)
             make.trailing.equalTo(sendButton.snp.leading).offset(-8)
             make.bottom.equalTo(sendButton.snp.bottom)
             make.top.equalToSuperview().offset(10)
@@ -391,7 +537,7 @@ extension ChatViewController {
     func setupScrollToBottomButton() {
         view.addSubview(scrollToBottomButton)
         scrollToBottomButton.snp.makeConstraints { make in
-            make.trailing.equalToSuperview().inset(16)
+            make.trailing.equalTo(view.safeAreaLayoutGuide).inset(16)
             make.bottom.equalTo(inputContainerView.snp.top).offset(-12)
         }
 
@@ -407,6 +553,10 @@ extension ChatViewController {
 
     func disableAutoPinForCurrentStream() {
         throttler.disablePinToBottomForCurrentStream()
+    }
+
+    func refreshAutoPinForCurrentStreamIfNeeded() {
+        throttler.refreshPinToBottomForCurrentStream()
     }
 
     @objc

@@ -77,6 +77,7 @@ nonisolated struct Message: Hashable, Sendable, Codable {
     var thinkRoutingState: ThinkRoutingState
     var isReasoningExpanded: Bool
     var layoutVersion: Int
+    var maxTokenHitCount: Int?
     let createdAt: Date
     var status: Status
 
@@ -89,6 +90,7 @@ nonisolated struct Message: Hashable, Sendable, Codable {
         thinkRoutingState: ThinkRoutingState = ThinkRoutingState(),
         isReasoningExpanded: Bool = false,
         layoutVersion: Int = 0,
+        maxTokenHitCount: Int? = nil,
         createdAt: Date = Date(),
         status: Status = .success
     ) {
@@ -107,6 +109,7 @@ nonisolated struct Message: Hashable, Sendable, Codable {
         self.thinkRoutingState = thinkRoutingState
         self.isReasoningExpanded = isReasoningExpanded
         self.layoutVersion = layoutVersion
+        self.maxTokenHitCount = maxTokenHitCount
         self.createdAt = createdAt
         self.status = status
     }
@@ -156,10 +159,11 @@ extension Message {
         case success
         case streaming
         case failed(String)
+        case needsContinuation
 
         var isTerminal: Bool {
             switch self {
-            case .canceled, .success, .failed:
+            case .canceled, .success, .failed, .needsContinuation:
                 return true
             case .pending, .streaming:
                 return false
@@ -177,6 +181,7 @@ extension Message {
             case success
             case streaming
             case failed
+            case needsContinuation
         }
 
         init(from decoder: Decoder) throws {
@@ -194,6 +199,8 @@ extension Message {
             case .failed:
                 let value = try container.decode(String.self, forKey: .value)
                 self = .failed(value)
+            case .needsContinuation:
+                self = .needsContinuation
             }
         }
 
@@ -211,6 +218,8 @@ extension Message {
             case .failed(let value):
                 try container.encode(Kind.failed, forKey: .type)
                 try container.encode(value, forKey: .value)
+            case .needsContinuation:
+                try container.encode(Kind.needsContinuation, forKey: .type)
             }
         }
     }

@@ -1,13 +1,13 @@
 import Foundation
 
-struct ProjectedMarkdownBlock: Hashable, Sendable {
+nonisolated struct ProjectedMarkdownBlock: Hashable, Sendable {
     let keySuffix: String
     let kind: ChatItem.Kind
     let text: String
     let copyText: String
 }
 
-enum MarkdownBlockProjector {
+nonisolated enum MarkdownBlockProjector {
     static func project(_ markdown: String) -> [ProjectedMarkdownBlock] {
         let lines = markdown.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         guard !lines.isEmpty else { return [] }
@@ -139,6 +139,15 @@ enum MarkdownBlockProjector {
         var index = line.startIndex
         while index < line.endIndex, line[index].isWhitespace {
             index = line.index(after: index)
+        }
+
+        if line[index...].hasPrefix("---") {
+            while index < line.endIndex, line[index] == "-" {
+                index = line.index(after: index)
+            }
+            while index < line.endIndex, line[index].isWhitespace {
+                index = line.index(after: index)
+            }
         }
 
         var level = 0

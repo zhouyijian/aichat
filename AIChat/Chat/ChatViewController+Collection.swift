@@ -17,7 +17,10 @@ extension ChatViewController {
         }
     }
 
-    func applySnapshot(animatingDifferences: Bool = true) {
+    func applySnapshot(
+        animatingDifferences: Bool = true,
+        completion: (() -> Void)? = nil
+    ) {
         let items = viewModel.chatItems
         snapshotApplyGeneration &+= 1
         let generation = snapshotApplyGeneration
@@ -27,8 +30,9 @@ extension ChatViewController {
         snapshot.appendSections([.main])
         snapshot.appendItems(items.map(\.id), toSection: .main)
         dataSource.apply(snapshot, animatingDifferences: animatingDifferences) { [weak self] in
-            guard self?.snapshotApplyGeneration == generation else { return }
-            self?.commitDisplayedItems(items)
+            guard let self, self.snapshotApplyGeneration == generation else { return }
+            self.commitDisplayedItems(items)
+            completion?()
         }
     }
 
@@ -57,11 +61,10 @@ extension ChatViewController {
 
     /// Refreshes one message's rendered blocks and optionally keeps viewport pinned to bottom.
     func updateMessageUI(id: UUID, shouldPinToBottom: Bool) {
-        refreshMessageItems(id: id, animated: false)
-
-        guard shouldPinToBottom else { return }
-        DispatchQueue.main.async { [weak self] in
-            self?.scrollToBottomByItem(animated: false)
+        let bottomDistance: CGFloat? = shouldPinToBottom ? 0 : nil
+        refreshMessageItems(id: id, animated: false) { [weak self] in
+            guard let self, let bottomDistance else { return }
+            self.restoreBottomDistance(bottomDistance)
         }
     }
 
@@ -84,6 +87,9 @@ extension ChatViewController {
         }
 
         reconfigureVisibleMessageCellsIfNeeded(messageID: id)
+        if shouldPinToBottom {
+            restoreBottomDistance(0)
+        }
     }
 
     func toggleReasoning(for id: UUID) {
@@ -138,6 +144,8 @@ private extension ChatViewController {
                 switch action {
                 case .toggleReasoning:
                     self?.toggleReasoning(for: item.messageID)
+                case .continueGeneration:
+                    self?.continueGeneration(for: item.messageID)
                 }
             }
             configureCopyActions(for: cell, item: item)
@@ -194,25 +202,54 @@ private extension ChatViewController {
         generator.notificationOccurred(.success)
     }
 
-    func refreshMessageItems(id: UUID, animated: Bool) {
+    func refreshMessageItems(
+        id: UUID,
+        animated: Bool,
+        completion: (() -> Void)? = nil
+    ) {
         let oldIDs = dataSource.snapshot().itemIdentifiers.filter { $0.messageID == id }
         let newIDs = viewModel.itemIDs(for: id)
 
         guard oldIDs == newIDs else {
-            applySnapshot(animatingDifferences: animated)
+            performWithoutStreamingAnimations {
+                applySnapshot(animatingDifferences: animated) { [weak self] in
+                    self?.collectionView.layoutIfNeeded()
+                    completion?()
+                }
+            }
             return
         }
 
-        guard !newIDs.isEmpty else { return }
+        guard !newIDs.isEmpty else {
+            completion?()
+            return
+        }
         syncDisplayedItemsFromViewModel()
-        collectionView.collectionViewLayout.invalidateLayout()
 
         var snapshot = dataSource.snapshot()
         let existingIDs = newIDs.filter { snapshot.indexOfItem($0) != nil }
-        guard !existingIDs.isEmpty else { return }
+        guard !existingIDs.isEmpty else {
+            completion?()
+            return
+        }
 
-        snapshot.reconfigureItems(existingIDs)
-        dataSource.apply(snapshot, animatingDifferences: animated)
+        performWithoutStreamingAnimations {
+            collectionView.collectionViewLayout.invalidateLayout()
+            snapshot.reconfigureItems(existingIDs)
+            dataSource.apply(snapshot, animatingDifferences: animated) { [weak self] in
+                self?.collectionView.layoutIfNeeded()
+                completion?()
+            }
+        }
+    }
+
+    func performWithoutStreamingAnimations(_ updates: () -> Void) {
+        UIView.performWithoutAnimation {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            updates()
+            CATransaction.commit()
+        }
     }
 
     func reconfigureVisibleMessageCellsIfNeeded(messageID: UUID) {
@@ -271,13 +308,13 @@ extension ChatViewController {
     }
 
     private func fastMeasureHeight(for item: ChatItem, width: CGFloat) -> CGFloat {
-        let outerVerticalInsets = (item.isFirstInMessage ? 6.0 : 0.0) + (item.isLastInMessage ? 6.0 : 0.0)
+        let outerVerticalInsets = item.outerVerticalPadding
 
         switch item.kind {
         case .markdown:
             let font = UIFont.systemFont(ofSize: 16)
             let textWidth = max(0, containerWidth(for: item, within: width) - 24)
-            return outerVerticalInsets + 24 + richTextHeight(for: item, font: font, width: textWidth)
+            return outerVerticalInsets + textVerticalPadding(for: item) + richTextHeight(for: item, font: font, width: textWidth)
 
         case .heading(let level):
             let font: UIFont
@@ -294,37 +331,31 @@ extension ChatViewController {
                 font = .systemFont(ofSize: 16, weight: .semibold)
             }
             let textWidth = max(0, containerWidth(for: item, within: width) - 24)
-            return outerVerticalInsets + 24 + richTextHeight(for: item, font: font, width: textWidth)
+            return outerVerticalInsets + textVerticalPadding(for: item) + richTextHeight(for: item, font: font, width: textWidth)
 
         case .quote:
             let font = UIFont.systemFont(ofSize: 15)
             let textWidth = max(0, containerWidth(for: item, within: width) - 37)
-            return outerVerticalInsets + 24 + richTextHeight(for: item, font: font, width: textWidth)
+            return outerVerticalInsets + textVerticalPadding(for: item) + richTextHeight(for: item, font: font, width: textWidth)
 
         case .list:
             let font = UIFont.systemFont(ofSize: 16)
             let textWidth = max(0, containerWidth(for: item, within: width) - 24)
-            return outerVerticalInsets + 24 + richTextHeight(for: item, font: font, width: textWidth)
+            return outerVerticalInsets + textVerticalPadding(for: item) + richTextHeight(for: item, font: font, width: textWidth)
 
         case .table:
-            let rowCount = max(1, item.text.split(separator: "\n", omittingEmptySubsequences: false).count)
-            let headerHeight: CGFloat = 40
-            let bodyRowHeight: CGFloat = 44
-            let separatorHeight = CGFloat(max(0, rowCount - 1))
-            let contentHeight = headerHeight + CGFloat(max(0, rowCount - 1)) * bodyRowHeight + separatorHeight
-            return outerVerticalInsets + 20 + contentHeight
+            return outerVerticalInsets + ChatTableBlockCell.estimatedContentHeight(for: item.text)
 
         case .reasoning, .status:
             let font = UIFont.systemFont(ofSize: 13)
             let textWidth = max(0, containerWidth(for: item, within: width) - 24)
-            return outerVerticalInsets + 24 + richTextHeight(for: item, font: font, width: textWidth)
+            return outerVerticalInsets + textVerticalPadding(for: item) + richTextHeight(for: item, font: font, width: textWidth)
 
         case .code(let language):
-            let font = UIFont.monospacedSystemFont(ofSize: 14, weight: .regular)
-            let textWidth = max(0, containerWidth(for: item, within: width) - 40)
-            let languageHeight: CGFloat = language == nil ? 0 : 22
-            let codeTopOffset: CGFloat = 4
-            return outerVerticalInsets + 20 + 20 + languageHeight + codeTopOffset + textHeight(text: item.text, font: font, width: textWidth)
+            return outerVerticalInsets + ChatCodeBlockCell.estimatedContentHeight(
+                for: item.text,
+                language: language
+            )
 
         case .image(_, let alt):
             let captionHeight = (alt?.isEmpty == false) ? 28.0 : 0
@@ -344,6 +375,21 @@ extension ChatViewController {
         return floor(width * 0.82)
     }
 
+    private func textVerticalPadding(for item: ChatItem) -> CGFloat {
+        guard item.role == .assistant else { return 20 }
+
+        switch item.kind {
+        case .heading:
+            return 7
+        case .quote:
+            return 6
+        case .reasoning, .status:
+            return 4
+        default:
+            return 4
+        }
+    }
+
     private func usesExpandedAssistantLayout(for item: ChatItem) -> Bool {
         guard item.role == .assistant else { return false }
 
@@ -355,10 +401,16 @@ extension ChatViewController {
 
     private func textHeight(text: String, font: UIFont, width: CGFloat) -> CGFloat {
         let safeText = text.isEmpty ? " " : text
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.lineBreakMode = .byCharWrapping
+        paragraphStyle.lineSpacing = 2
         let rect = (safeText as NSString).boundingRect(
             with: CGSize(width: width, height: .greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: [.font: font],
+            attributes: [
+                .font: font,
+                .paragraphStyle: paragraphStyle
+            ],
             context: nil
         )
         return ceil(rect.height)

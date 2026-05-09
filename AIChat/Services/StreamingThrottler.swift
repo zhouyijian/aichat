@@ -19,9 +19,9 @@ final class StreamingThrottler {
     private let shouldPinToBottom: () -> Bool
     private let onTick: (UUID, Bool) -> Void
 
-    /// interval 默认 100ms
+    /// interval 默认约 30fps，流式文本增长会比 100ms 批量刷新自然一些。
     init(
-        intervalNs: UInt64 = 100_000_000,
+        intervalNs: UInt64 = 33_000_000,
         shouldPinToBottom: @escaping () -> Bool = { false },
         onTick: @escaping (UUID, Bool) -> Void
     ) {
@@ -39,12 +39,20 @@ final class StreamingThrottler {
         if task == nil {
             shouldPinToBottomForCurrentStream = shouldPinToBottom()
             startLoop()
+        } else if shouldPinToBottom() {
+            shouldPinToBottomForCurrentStream = true
         }
     }
 
     /// 用户手动滚动时，关闭当前流式会话的自动跟随到底部
     func disablePinToBottomForCurrentStream() {
         shouldPinToBottomForCurrentStream = false
+    }
+
+    /// 用户重新回到底部时，恢复当前流式会话的自动跟随到底部
+    func refreshPinToBottomForCurrentStream() {
+        guard task != nil else { return }
+        shouldPinToBottomForCurrentStream = shouldPinToBottom()
     }
 
     /// 流式结束/页面退出时调用

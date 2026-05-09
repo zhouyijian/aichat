@@ -25,8 +25,7 @@ class ChatBubbleCell: UICollectionViewCell, UIContextMenuInteractionDelegate {
     private var topConstraint: Constraint?
     private var bottomConstraint: Constraint?
     private var currentPresentation: Presentation?
-    private var currentFirstInMessage: Bool?
-    private var currentLastInMessage: Bool?
+    private var currentOuterInsets: UIEdgeInsets?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -43,14 +42,13 @@ class ChatBubbleCell: UICollectionViewCell, UIContextMenuInteractionDelegate {
         onCopyBlock = nil
         onCopyMessage = nil
         currentPresentation = nil
-        currentFirstInMessage = nil
-        currentLastInMessage = nil
+        currentOuterInsets = nil
     }
 
     func configureChrome(for item: ChatItem) {
         let presentation = presentation(for: item)
         updateAlignmentIfNeeded(for: presentation)
-        updateInsetsIfNeeded(isFirst: item.isFirstInMessage, isLast: item.isLastInMessage)
+        updateInsetsIfNeeded(for: item, presentation: presentation)
         updateCornersIfNeeded(for: presentation, isFirst: item.isFirstInMessage, isLast: item.isLastInMessage)
         applyStyle(for: presentation)
     }
@@ -136,13 +134,32 @@ class ChatBubbleCell: UICollectionViewCell, UIContextMenuInteractionDelegate {
         currentPresentation = presentation
     }
 
-    private func updateInsetsIfNeeded(isFirst: Bool, isLast: Bool) {
-        guard currentFirstInMessage != isFirst || currentLastInMessage != isLast else { return }
+    private func updateInsetsIfNeeded(for item: ChatItem, presentation: Presentation) {
+        let insets = outerInsets(for: item, presentation: presentation)
+        guard currentOuterInsets != insets else { return }
 
-        topConstraint?.update(offset: isFirst ? 6 : 0)
-        bottomConstraint?.update(offset: isLast ? -6 : 0)
-        currentFirstInMessage = isFirst
-        currentLastInMessage = isLast
+        topConstraint?.update(offset: insets.top)
+        bottomConstraint?.update(offset: -insets.bottom)
+        currentOuterInsets = insets
+    }
+
+    private func outerInsets(for item: ChatItem, presentation: Presentation) -> UIEdgeInsets {
+        switch presentation {
+        case .userBubble, .systemBubble:
+            return UIEdgeInsets(
+                top: item.outerTopSpacing,
+                left: 0,
+                bottom: item.outerBottomSpacing,
+                right: 0
+            )
+        case .assistantFlow, .assistantBubble:
+            return UIEdgeInsets(
+                top: item.outerTopSpacing,
+                left: 0,
+                bottom: item.outerBottomSpacing,
+                right: 0
+            )
+        }
     }
 
     private func updateCornersIfNeeded(for presentation: Presentation, isFirst: Bool, isLast: Bool) {
@@ -207,9 +224,11 @@ class ChatBubbleCell: UICollectionViewCell, UIContextMenuInteractionDelegate {
             return .userBubble
         case .assistant:
             switch item.kind {
-            case .markdown, .heading, .quote, .list, .status, .control:
+            case .markdown, .heading, .quote, .list, .reasoning, .status, .control:
                 return .assistantFlow
-            case .table, .code, .image, .reasoning:
+            case .table, .code:
+                return .assistantFlow
+            case .image:
                 return .assistantBubble
             }
         case .system:
@@ -224,11 +243,16 @@ final class ChatTextBlockCell: ChatBubbleCell {
 
     private let label = UILabel()
     private let quoteStripe = UIView()
+    private var labelTopConstraint: Constraint?
+    private var labelBottomConstraint: Constraint?
+    private var quoteTopConstraint: Constraint?
+    private var quoteBottomConstraint: Constraint?
     private var labelLeadingConstraint: Constraint?
     private var labelLeadingWithStripeConstraint: Constraint?
     private var currentText: String?
     private var currentKind: ChatItem.Kind?
     private var currentRendersMarkdown: Bool?
+    private var currentVerticalInsets: UIEdgeInsets?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -247,10 +271,12 @@ final class ChatTextBlockCell: ChatBubbleCell {
         currentText = nil
         currentKind = nil
         currentRendersMarkdown = nil
+        currentVerticalInsets = nil
     }
 
     func configure(with item: ChatItem) {
         configureChrome(for: item)
+        updateVerticalInsetsIfNeeded(for: item)
 
         if currentKind != item.kind {
             switch item.kind {
@@ -311,8 +337,38 @@ final class ChatTextBlockCell: ChatBubbleCell {
         }
     }
 
+    private func updateVerticalInsetsIfNeeded(for item: ChatItem) {
+        let insets = verticalInsets(for: item)
+        guard currentVerticalInsets != insets else { return }
+
+        labelTopConstraint?.update(offset: insets.top)
+        labelBottomConstraint?.update(offset: -insets.bottom)
+        quoteTopConstraint?.update(offset: insets.top)
+        quoteBottomConstraint?.update(offset: -insets.bottom)
+        currentVerticalInsets = insets
+    }
+
+    private func verticalInsets(for item: ChatItem) -> UIEdgeInsets {
+        guard item.role == .assistant else {
+            return UIEdgeInsets(top: 10, left: 12, bottom: 10, right: 12)
+        }
+
+        switch item.kind {
+        case .heading:
+            return UIEdgeInsets(top: 4, left: 12, bottom: 3, right: 12)
+        case .quote:
+            return UIEdgeInsets(top: 3, left: 12, bottom: 3, right: 12)
+        case .reasoning, .status:
+            return UIEdgeInsets(top: 2, left: 12, bottom: 2, right: 12)
+        default:
+            return UIEdgeInsets(top: 2, left: 12, bottom: 2, right: 12)
+        }
+    }
+
     private func setupLabel() {
         label.numberOfLines = 0
+        label.lineBreakMode = .byCharWrapping
+        label.setContentCompressionResistancePriority(.required, for: .vertical)
         quoteStripe.backgroundColor = .systemGray3
         quoteStripe.layer.cornerRadius = 1.5
 
@@ -321,11 +377,14 @@ final class ChatTextBlockCell: ChatBubbleCell {
 
         quoteStripe.snp.makeConstraints { make in
             make.leading.equalToSuperview().offset(12)
-            make.top.bottom.equalToSuperview().inset(12)
+            quoteTopConstraint = make.top.equalToSuperview().offset(12).constraint
+            quoteBottomConstraint = make.bottom.equalToSuperview().offset(-12).constraint
             make.width.equalTo(3)
         }
         label.snp.makeConstraints { make in
-            make.top.bottom.trailing.equalToSuperview().inset(12)
+            labelTopConstraint = make.top.equalToSuperview().offset(12).constraint
+            labelBottomConstraint = make.bottom.equalToSuperview().offset(-12).constraint
+            make.trailing.equalToSuperview().inset(12)
             labelLeadingConstraint = make.leading.equalToSuperview().offset(12).constraint
             labelLeadingWithStripeConstraint = make.leading.equalTo(quoteStripe.snp.trailing).offset(10).constraint
         }
@@ -354,11 +413,21 @@ final class ChatCodeBlockCell: ChatBubbleCell {
     static let reuseID = "ChatCodeBlockCell"
 
     private let containerView = UIView()
+    private let scrollView = UIScrollView()
     private let languageLabel = UILabel()
     private let codeLabel = UILabel()
     private var languageHeightConstraint: Constraint?
+    private var codeWidthConstraint: Constraint?
     private var currentText: String?
     private var currentLanguage: String?
+
+    static func estimatedContentHeight(for text: String, language: String?) -> CGFloat {
+        let font = UIFont.monospacedSystemFont(ofSize: 14, weight: .regular)
+        let lineCount = max(1, text.split(separator: "\n", omittingEmptySubsequences: false).count)
+        let codeHeight = CGFloat(lineCount) * ceil(font.lineHeight)
+        let languageHeight: CGFloat = language == nil ? 0 : 18
+        return max(52, 24 + languageHeight + 6 + codeHeight)
+    }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -396,37 +465,71 @@ final class ChatCodeBlockCell: ChatBubbleCell {
 
         if currentText != item.text {
             codeLabel.text = item.text
+            codeWidthConstraint?.update(offset: Self.estimatedCodeWidth(for: item.text))
             currentText = item.text
         }
     }
 
     private func setupCodeViews() {
-        containerView.backgroundColor = .tertiarySystemBackground
-        containerView.layer.cornerRadius = 10
+        containerView.backgroundColor = UIColor { trait in
+            trait.userInterfaceStyle == .dark
+                ? UIColor.secondarySystemBackground
+                : UIColor(white: 0.965, alpha: 1)
+        }
+        containerView.layer.cornerRadius = 12
         containerView.layer.masksToBounds = true
 
         languageLabel.font = .systemFont(ofSize: 11, weight: .semibold)
         languageLabel.textColor = .secondaryLabel
 
+        scrollView.showsHorizontalScrollIndicator = false
+        scrollView.alwaysBounceHorizontal = true
+        scrollView.alwaysBounceVertical = false
+        scrollView.backgroundColor = .clear
+
         codeLabel.numberOfLines = 0
+        codeLabel.lineBreakMode = .byClipping
         codeLabel.font = .monospacedSystemFont(ofSize: 14, weight: .regular)
         codeLabel.textColor = .label
+        codeLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         bubbleView.addSubview(containerView)
         containerView.addSubview(languageLabel)
-        containerView.addSubview(codeLabel)
+        containerView.addSubview(scrollView)
+        scrollView.addSubview(codeLabel)
 
         containerView.snp.makeConstraints { make in
-            make.edges.equalToSuperview().inset(10)
+            make.top.bottom.equalToSuperview()
+            make.leading.trailing.equalToSuperview().inset(12)
         }
         languageLabel.snp.makeConstraints { make in
-            make.top.leading.trailing.equalToSuperview().inset(10)
+            make.top.leading.trailing.equalToSuperview().inset(12)
             languageHeightConstraint = make.height.equalTo(0).constraint
         }
-        codeLabel.snp.makeConstraints { make in
-            make.top.equalTo(languageLabel.snp.bottom).offset(4)
-            make.leading.trailing.bottom.equalToSuperview().inset(10)
+        scrollView.snp.makeConstraints { make in
+            make.top.equalTo(languageLabel.snp.bottom).offset(6)
+            make.leading.trailing.bottom.equalToSuperview().inset(12)
         }
+        codeLabel.snp.makeConstraints { make in
+            make.edges.equalToSuperview()
+            make.height.equalToSuperview()
+            codeWidthConstraint = make.width.equalTo(1).constraint
+        }
+    }
+
+    private static func estimatedCodeWidth(for text: String) -> CGFloat {
+        let font = UIFont.monospacedSystemFont(ofSize: 14, weight: .regular)
+        let longestLine = text
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
+            .max { lhs, rhs in lhs.count < rhs.count } ?? ""
+        let measured = (longestLine as NSString).boundingRect(
+            with: CGSize(width: CGFloat.greatestFiniteMagnitude, height: ceil(font.lineHeight)),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [.font: font],
+            context: nil
+        ).width
+        return max(1, ceil(measured))
     }
 }
 
@@ -441,6 +544,10 @@ final class ChatTableBlockCell: ChatBubbleCell {
     private var currentText: String?
     private var currentRole: Role?
     private var currentAlignments: [TableColumnAlignment] = []
+
+    static func estimatedContentHeight(for text: String) -> CGFloat {
+        tableLayout(for: text).totalHeight
+    }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -477,16 +584,27 @@ final class ChatTableBlockCell: ChatBubbleCell {
     private func setupTableViews() {
         scrollView.showsHorizontalScrollIndicator = false
         scrollView.alwaysBounceHorizontal = false
+        scrollView.backgroundColor = UIColor { trait in
+            trait.userInterfaceStyle == .dark
+                ? UIColor.secondarySystemBackground
+                : UIColor(white: 0.965, alpha: 1)
+        }
+        scrollView.layer.cornerRadius = 12
+        scrollView.layer.borderWidth = 0.5
+        scrollView.layer.borderColor = UIColor.separator.cgColor
+        scrollView.layer.masksToBounds = true
 
         contentStackView.axis = .vertical
         contentStackView.spacing = 1
         contentStackView.distribution = .fill
+        contentStackView.backgroundColor = .separator
 
         bubbleView.addSubview(scrollView)
         scrollView.addSubview(contentStackView)
 
         scrollView.snp.makeConstraints { make in
-            make.edges.equalToSuperview().inset(6)
+            make.top.bottom.equalToSuperview()
+            make.leading.trailing.equalToSuperview().inset(12)
             make.height.greaterThanOrEqualTo(44)
         }
         contentStackView.snp.makeConstraints { make in
@@ -501,12 +619,11 @@ final class ChatTableBlockCell: ChatBubbleCell {
             row.removeFromSuperview()
         }
 
-        let layout = tableLayout(for: text)
+        let layout = Self.tableLayout(for: text)
         let rows = layout.rows
         guard !rows.isEmpty else { return }
 
         contentWidthConstraint?.update(offset: layout.totalWidth)
-        scrollView.alwaysBounceHorizontal = layout.totalWidth > bounds.width - 20
         let textColor: UIColor = role == .user ? .white : .label
 
         for (rowIndex, cells) in rows.enumerated() {
@@ -516,23 +633,37 @@ final class ChatTableBlockCell: ChatBubbleCell {
             rowView.distribution = .fill
             rowView.backgroundColor = .separator
             rowView.snp.makeConstraints { make in
-                make.height.equalTo(rowIndex == 0 ? 40 : 44)
+                make.height.equalTo(layout.rowHeights[rowIndex])
             }
 
             for (columnIndex, cell) in cells.enumerated() {
                 let label = UILabel()
                 label.numberOfLines = 0
-                label.text = cell.isEmpty ? " " : cell
                 label.textColor = textColor
                 label.font = rowIndex == 0
                     ? .systemFont(ofSize: 14, weight: .semibold)
                     : .systemFont(ofSize: 14)
-                label.textAlignment = textAlignment(for: alignments[safe: columnIndex] ?? .leading)
+                let alignment = textAlignment(for: alignments[safe: columnIndex] ?? .leading)
+                label.textAlignment = alignment
+                label.attributedText = MarkdownRenderer.tableCellAttributedString(
+                    from: cell,
+                    baseFont: label.font,
+                    textColor: textColor,
+                    alignment: alignment
+                )
 
                 let container = UIView()
                 container.backgroundColor = rowIndex == 0
-                    ? .tertiarySystemBackground
-                    : .systemBackground.withAlphaComponent(role == .user ? 0.18 : 0.55)
+                    ? UIColor { trait in
+                        trait.userInterfaceStyle == .dark
+                            ? UIColor.tertiarySystemBackground
+                            : UIColor.systemBackground
+                    }
+                    : UIColor { trait in
+                        trait.userInterfaceStyle == .dark
+                            ? UIColor.secondarySystemBackground
+                            : UIColor(white: 0.985, alpha: 1)
+                    }.withAlphaComponent(role == .user ? 0.18 : 1)
                 container.setContentCompressionResistancePriority(.required, for: .horizontal)
                 container.setContentHuggingPriority(.required, for: .horizontal)
                 container.snp.makeConstraints { make in
@@ -540,7 +671,7 @@ final class ChatTableBlockCell: ChatBubbleCell {
                 }
                 container.addSubview(label)
                 label.snp.makeConstraints { make in
-                    make.edges.equalToSuperview().inset(UIEdgeInsets(top: 10, left: 8, bottom: 10, right: 8))
+                    make.edges.equalToSuperview().inset(UIEdgeInsets(top: 10, left: 12, bottom: 10, right: 12))
                 }
 
                 rowView.addArrangedSubview(container)
@@ -551,6 +682,10 @@ final class ChatTableBlockCell: ChatBubbleCell {
     }
 
     private func textAlignment(for alignment: TableColumnAlignment) -> NSTextAlignment {
+        Self.textAlignment(for: alignment)
+    }
+
+    private static func textAlignment(for alignment: TableColumnAlignment) -> NSTextAlignment {
         switch alignment {
         case .leading:
             return .left
@@ -561,7 +696,7 @@ final class ChatTableBlockCell: ChatBubbleCell {
         }
     }
 
-    private func tableLayout(for text: String) -> TableLayoutCacheEntry {
+    private static func tableLayout(for text: String) -> TableLayoutCacheEntry {
         let key = text as NSString
         if let cached = Self.layoutCache.object(forKey: key) {
             return cached
@@ -574,15 +709,16 @@ final class ChatTableBlockCell: ChatBubbleCell {
             }
         let columnCount = rows.map(\.count).max() ?? 0
         guard columnCount > 0 else {
-            let empty = TableLayoutCacheEntry(rows: [], columnWidths: [], totalWidth: 0)
+            let empty = TableLayoutCacheEntry(rows: [], columnWidths: [], rowHeights: [], totalWidth: 0, totalHeight: 0)
             Self.layoutCache.setObject(empty, forKey: key)
             return empty
         }
 
         let headerFont = UIFont.systemFont(ofSize: 14, weight: .semibold)
         let bodyFont = UIFont.systemFont(ofSize: 14)
-        let horizontalPadding: CGFloat = 20
-        let minWidth: CGFloat = 64
+        let horizontalPadding: CGFloat = 28
+        let verticalPadding: CGFloat = 20
+        let minWidth: CGFloat = 72
         let maxWidth: CGFloat = 220
 
         var widths = Array(repeating: minWidth, count: columnCount)
@@ -590,18 +726,49 @@ final class ChatTableBlockCell: ChatBubbleCell {
             for columnIndex in 0..<columnCount {
                 let text = columnIndex < row.count ? row[columnIndex] : ""
                 let font = rowIndex == 0 ? headerFont : bodyFont
-                let measuredWidth = ceil((text.isEmpty ? " " : text as NSString).boundingRect(
+                let attributed = MarkdownRenderer.tableCellAttributedString(
+                    from: text,
+                    baseFont: font,
+                    textColor: .label,
+                    alignment: textAlignment(for: .leading)
+                )
+                let measuredWidth = ceil(attributed.boundingRect(
                     with: CGSize(width: CGFloat.greatestFiniteMagnitude, height: 24),
                     options: [.usesLineFragmentOrigin, .usesFontLeading],
-                    attributes: [.font: font],
                     context: nil
                 ).width)
                 widths[columnIndex] = max(widths[columnIndex], min(maxWidth, measuredWidth + horizontalPadding))
             }
         }
 
+        let rowHeights = rows.enumerated().map { rowIndex, row in
+            let font = rowIndex == 0 ? headerFont : bodyFont
+            let minHeight: CGFloat = rowIndex == 0 ? 42 : 48
+            var height = minHeight
+
+            for columnIndex in 0..<columnCount {
+                let text = columnIndex < row.count ? row[columnIndex] : ""
+                let attributed = MarkdownRenderer.tableCellAttributedString(
+                    from: text,
+                    baseFont: font,
+                    textColor: .label,
+                    alignment: textAlignment(for: .leading)
+                )
+                let textWidth = max(1, widths[columnIndex] - horizontalPadding)
+                let measuredHeight = ceil(attributed.boundingRect(
+                    with: CGSize(width: textWidth, height: .greatestFiniteMagnitude),
+                    options: [.usesLineFragmentOrigin, .usesFontLeading],
+                    context: nil
+                ).height) + verticalPadding
+                height = max(height, measuredHeight)
+            }
+
+            return height
+        }
+
         let totalWidth = widths.reduce(0, +) + CGFloat(max(0, columnCount - 1))
-        let layout = TableLayoutCacheEntry(rows: rows, columnWidths: widths, totalWidth: totalWidth)
+        let totalHeight = rowHeights.reduce(0, +) + CGFloat(max(0, rows.count - 1))
+        let layout = TableLayoutCacheEntry(rows: rows, columnWidths: widths, rowHeights: rowHeights, totalWidth: totalWidth, totalHeight: totalHeight)
         Self.layoutCache.setObject(layout, forKey: key)
         return layout
     }
@@ -609,12 +776,16 @@ final class ChatTableBlockCell: ChatBubbleCell {
     private final class TableLayoutCacheEntry: NSObject {
         let rows: [[String]]
         let columnWidths: [CGFloat]
+        let rowHeights: [CGFloat]
         let totalWidth: CGFloat
+        let totalHeight: CGFloat
 
-        init(rows: [[String]], columnWidths: [CGFloat], totalWidth: CGFloat) {
+        init(rows: [[String]], columnWidths: [CGFloat], rowHeights: [CGFloat], totalWidth: CGFloat, totalHeight: CGFloat) {
             self.rows = rows
             self.columnWidths = columnWidths
+            self.rowHeights = rowHeights
             self.totalWidth = totalWidth
+            self.totalHeight = totalHeight
         }
     }
 }

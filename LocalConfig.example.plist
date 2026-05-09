@@ -5,8 +5,12 @@
 	<key>StreamingAPIKey</key>
 	<string>YOUR_API_KEY</string>
 	<key>StreamingEndpointURL</key>
-	<string>https://api.minimaxi.com/v1/chat/completions</string>
+	<string>https://api.minimaxi.com/anthropic/v1/messages</string>
 	<key>StreamingModel</key>
-	<string>MiniMax-M2</string>
+	<string>MiniMax-M2.7</string>
+	<key>StreamingMaxTokens</key>
+	<integer>2048</integer>
+	<key>StreamingTemperature</key>
+	<real>1.0</real>
 </dict>
 </plist>
