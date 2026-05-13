@@ -22,7 +22,6 @@ final class ChatViewController: UIViewController {
     // MARK: - Dependencies
     let viewModel = ChatViewModel(repository: LocalConversationRepository())
     private let systemPrompt = "你是一个简洁、专业的中文助手。数据表格、对比表、参数表必须使用标准 Markdown 表格。需要画流程、结构、时间线、坐标、层级等示意图时，可以使用 ASCII diagram，但必须放在代码块中。不要用 ASCII/框线图模拟数据表格。"
-    private let streamClient = MiniMaxAnthropicStreamingClient()
     private let toolPlannerClient = ToolPlannerClient()
     private let toolRegistry = ToolRegistry.makeDefault()
     private let memoryStore = LocalMemoryStore()
@@ -36,7 +35,9 @@ final class ChatViewController: UIViewController {
             contentDelta: contentDelta,
             reasoningDelta: reasoningDelta
         )
-        self.throttler.markChanged(id: id)
+        if self.viewModel.conversationID(containingMessageID: id) == self.viewModel.currentConversationID {
+            self.throttler.markChanged(id: id)
+        }
     }
 
     // MARK: - UI
@@ -49,9 +50,12 @@ final class ChatViewController: UIViewController {
     private let inputTextView = UITextView()
     private let sendButton = UIButton(type: .system)
     private var inputTextHeightConstraint: Constraint?
-    private var currentStreamingAssistantID: UUID?
-    private var currentToolTask: Task<Void, Never>?
+    private var activeAssistantIDByConversationID: [UUID: UUID] = [:]
+    private var activeConversationIDByAssistantID: [UUID: UUID] = [:]
+    private var toolTasksByConversationID: [UUID: Task<Void, Never>] = [:]
+    private var streamClientsByConversationID: [UUID: MiniMaxAnthropicStreamingClient] = [:]
     private var continuationPrefixFilters: [UUID: StreamingContinuationPrefixFilter] = [:]
+    private var didPerformInitialAppearanceScroll = false
     var streamingLayoutStates: [UUID: StreamingLayoutState] = [:]
 
     lazy var throttler = StreamingThrottler(
@@ -82,10 +86,12 @@ final class ChatViewController: UIViewController {
 
     // MARK: - Interaction State
     var userIsInteracting = false
-    private var isStreaming = false
 
     deinit {
         NotificationCenter.default.removeObserver(self)
+        for conversationID in Array(activeAssistantIDByConversationID.keys) {
+            cancelGenerationIfNeeded(for: conversationID, flushPending: false)
+        }
     }
 
     // MARK: - Lifecycle
@@ -110,6 +116,8 @@ final class ChatViewController: UIViewController {
     
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        guard !didPerformInitialAppearanceScroll else { return }
+        didPerformInitialAppearanceScroll = true
         scrollToBottomByItem(animated: false)
     }
 
@@ -128,7 +136,6 @@ final class ChatViewController: UIViewController {
 
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
-        stopCurrentStream(flushPending: false)
     }
 
     override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
@@ -176,12 +183,19 @@ final class ChatViewController: UIViewController {
         }
     }
     
-    private func startAssistantStream(request: ChatProviderRequest, assistantID: UUID) {
+    private func startAssistantStream(
+        request: ChatProviderRequest,
+        conversationID: UUID,
+        assistantID: UUID
+    ) {
+        let streamClient = MiniMaxAnthropicStreamingClient()
+        streamClientsByConversationID[conversationID] = streamClient
         streamClient.startStream(
             request: request,
             onDelta: { [weak self] contentDelta, reasoningDelta in
                 guard let self else { return }
                 Task { @MainActor in
+                    guard self.activeAssistantIDByConversationID[conversationID] == assistantID else { return }
                     let filteredContentDelta = self.filteredContinuationContentDelta(
                         contentDelta,
                         assistantID: assistantID
@@ -199,21 +213,37 @@ final class ChatViewController: UIViewController {
             onDone: { [weak self] finishReason in
                 guard let self else { return }
                 Task { @MainActor in
+                    guard self.activeAssistantIDByConversationID[conversationID] == assistantID else { return }
                     if finishReason == .maxTokens {
                         self.flushContinuationPrefixFilterIfNeeded(for: assistantID)
                         self.streamTextAnimator.flush(id: assistantID)
                         let maxTokenHitCount = self.viewModel.incrementMaxTokenHitCount(for: assistantID)
                         if !self.shouldShowManualContinuationButton(afterMaxTokenHitCount: maxTokenHitCount) {
-                            self.updateMessageUI(id: assistantID, shouldPinToBottom: true)
+                            self.updateMessageUIIfVisible(
+                                id: assistantID,
+                                shouldPinToBottom: self.shouldAutoPinToBottomDuringGeneration()
+                            )
                             self.viewModel.save()
-                            let request = self.makeContinuationRequest()
+                            let request = self.makeContinuationRequest(conversationID: conversationID)
                             self.prepareContinuationPrefixFilter(for: assistantID)
-                            self.startAssistantStream(request: request, assistantID: assistantID)
+                            self.startAssistantStream(
+                                request: request,
+                                conversationID: conversationID,
+                                assistantID: assistantID
+                            )
                         } else {
                             self.viewModel.setStatus(for: assistantID, status: .needsContinuation)
-                            self.updateMessageUI(id: assistantID, shouldPinToBottom: true)
+                            self.updateMessageUIIfVisible(
+                                id: assistantID,
+                                shouldPinToBottom: self.shouldAutoPinToBottomDuringGeneration()
+                            )
                             self.viewModel.save()
-                            self.stopCurrentStream(flushPending: true)
+                            self.finishGeneration(
+                                conversationID: conversationID,
+                                assistantID: assistantID,
+                                flushPending: true,
+                                cancelTask: false
+                            )
                         }
                         return
                     }
@@ -221,23 +251,34 @@ final class ChatViewController: UIViewController {
                     self.flushContinuationPrefixFilterIfNeeded(for: assistantID)
                     await self.streamTextAnimator.drain(id: assistantID)
                     self.viewModel.setStatus(for: assistantID, status: .success)
-                    self.updateMessageUI(id: assistantID, shouldPinToBottom: false)
+                    self.updateMessageUIIfVisible(id: assistantID, shouldPinToBottom: false)
                     self.viewModel.save()
-                    self.stopCurrentStream(flushPending: true)
+                    self.finishGeneration(
+                        conversationID: conversationID,
+                        assistantID: assistantID,
+                        flushPending: true,
+                        cancelTask: false
+                    )
                 }
             },
             onError: { [weak self] error in
                 guard let self else { return }
                 Task { @MainActor in
+                    guard self.activeAssistantIDByConversationID[conversationID] == assistantID else { return }
                     self.continuationPrefixFilters.removeValue(forKey: assistantID)
                     self.streamTextAnimator.flush(id: assistantID)
                     let currentText = self.viewModel.message(id: assistantID)?.contentText ?? ""
                     let message = currentText.isEmpty ? "❌ \(error.localizedDescription)" : "\(currentText)\n\n❌ \(error.localizedDescription)"
                     self.viewModel.setContent(for: assistantID, text: message)
                     self.viewModel.setStatus(for: assistantID, status: .failed(error.localizedDescription))
-                    self.updateMessageUI(id: assistantID, shouldPinToBottom: false)
+                    self.updateMessageUIIfVisible(id: assistantID, shouldPinToBottom: false)
                     self.viewModel.save()
-                    self.stopCurrentStream(flushPending: true)
+                    self.finishGeneration(
+                        conversationID: conversationID,
+                        assistantID: assistantID,
+                        flushPending: true,
+                        cancelTask: false
+                    )
                 }
             }
         )
@@ -245,7 +286,8 @@ final class ChatViewController: UIViewController {
 
     private func sendPrompt(_ prompt: String) {
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, !isStreaming else { return }
+        let conversationID = viewModel.currentConversationID
+        guard !trimmed.isEmpty, !isConversationStreaming(conversationID) else { return }
 
         if isContinuePrompt(trimmed),
            let assistantID = viewModel.latestContinuableAssistantID() {
@@ -256,19 +298,22 @@ final class ChatViewController: UIViewController {
         let userMsg = Message(role: .user, content: trimmed)
         appendMessage(userMsg, scrollToBottom: true)
 
-        let request = viewModel.chatProviderRequest(systemPrompt: systemPromptWithMemory())
+        let request = viewModel.chatProviderRequest(
+            systemPrompt: systemPromptWithMemory(),
+            conversationID: conversationID
+        )
         persistMemory(userText: trimmed, toolResult: nil)
 
         let assistantMsg = Message(role: .assistant, content: "", status: .pending)
         appendMessage(assistantMsg, scrollToBottom: true)
 
-        currentStreamingAssistantID = assistantMsg.id
-        isStreaming = true
+        registerActiveGeneration(conversationID: conversationID, assistantID: assistantMsg.id)
         updateConversationTitle()
         updateSendButtonState()
         startToolPlanningOrStream(
             request: request,
             userText: trimmed,
+            conversationID: conversationID,
             assistantID: assistantMsg.id
         )
     }
@@ -276,13 +321,15 @@ final class ChatViewController: UIViewController {
     private func startToolPlanningOrStream(
         request: ChatProviderRequest,
         userText: String,
+        conversationID: UUID,
         assistantID: UUID
     ) {
-        currentToolTask?.cancel()
-        currentToolTask = Task { @MainActor [weak self] in
+        toolTasksByConversationID[conversationID]?.cancel()
+        toolTasksByConversationID[conversationID] = Task { @MainActor [weak self] in
             await self?.planAndExecuteOrStream(
                 request: request,
                 userText: userText,
+                conversationID: conversationID,
                 assistantID: assistantID
             )
         }
@@ -292,24 +339,32 @@ final class ChatViewController: UIViewController {
     private func planAndExecuteOrStream(
         request: ChatProviderRequest,
         userText: String,
+        conversationID: UUID,
         assistantID: UUID
     ) async {
         do {
             let routedCalls = ToolIntentRouter.toolCalls(for: userText)
             if !routedCalls.isEmpty {
                 viewModel.setContent(for: assistantID, text: routedToolStatusText(for: routedCalls))
-                updateMessageUI(id: assistantID, shouldPinToBottom: true)
+                updateMessageUIIfVisible(
+                    id: assistantID,
+                    shouldPinToBottom: shouldAutoPinToBottomDuringGeneration()
+                )
 
                 let result = try await executeToolCalls(routedCalls, userText: userText)
                 guard !Task.isCancelled else { return }
 
-                let shouldPinToBottom = shouldAutoPinToBottomForToolResult()
+                let shouldPinToBottom = shouldAutoPinToBottomDuringGeneration()
                 viewModel.setToolResult(for: assistantID, result: result)
-                updateMessageUI(id: assistantID, shouldPinToBottom: shouldPinToBottom)
+                updateMessageUIIfVisible(id: assistantID, shouldPinToBottom: shouldPinToBottom)
                 persistMemory(userText: userText, toolResult: result)
                 viewModel.save()
-                currentToolTask = nil
-                stopCurrentStream(flushPending: true)
+                finishGeneration(
+                    conversationID: conversationID,
+                    assistantID: assistantID,
+                    flushPending: true,
+                    cancelTask: false
+                )
                 return
             }
 
@@ -320,42 +375,65 @@ final class ChatViewController: UIViewController {
             guard !Task.isCancelled else { return }
 
             guard planning.shouldExecuteTool else {
-                currentToolTask = nil
-                startAssistantStream(request: request, assistantID: assistantID)
+                toolTasksByConversationID[conversationID] = nil
+                startAssistantStream(
+                    request: request,
+                    conversationID: conversationID,
+                    assistantID: assistantID
+                )
                 return
             }
 
             viewModel.setContent(for: assistantID, text: "正在执行工具...")
-            updateMessageUI(id: assistantID, shouldPinToBottom: true)
+            updateMessageUIIfVisible(
+                id: assistantID,
+                shouldPinToBottom: shouldAutoPinToBottomDuringGeneration()
+            )
 
             let result = try await executeToolCalls(planning.toolCalls, userText: userText)
             guard !Task.isCancelled else { return }
 
-            let shouldPinToBottom = shouldAutoPinToBottomForToolResult()
+            let shouldPinToBottom = shouldAutoPinToBottomDuringGeneration()
             viewModel.setToolResult(for: assistantID, result: result)
-            updateMessageUI(id: assistantID, shouldPinToBottom: shouldPinToBottom)
+            updateMessageUIIfVisible(id: assistantID, shouldPinToBottom: shouldPinToBottom)
             persistMemory(userText: userText, toolResult: result)
             viewModel.save()
-            currentToolTask = nil
-            stopCurrentStream(flushPending: true)
+            finishGeneration(
+                conversationID: conversationID,
+                assistantID: assistantID,
+                flushPending: true,
+                cancelTask: false
+            )
         } catch ToolConfirmationCancellation.canceled {
             viewModel.setContent(for: assistantID, text: "已取消操作")
             viewModel.setStatus(for: assistantID, status: .success)
-            updateMessageUI(id: assistantID, shouldPinToBottom: false)
+            updateMessageUIIfVisible(id: assistantID, shouldPinToBottom: false)
             viewModel.save()
-            currentToolTask = nil
-            stopCurrentStream(flushPending: false)
+            finishGeneration(
+                conversationID: conversationID,
+                assistantID: assistantID,
+                flushPending: false,
+                cancelTask: false
+            )
         } catch is CancellationError {
-            currentToolTask = nil
-            stopCurrentStream(flushPending: false)
+            finishGeneration(
+                conversationID: conversationID,
+                assistantID: assistantID,
+                flushPending: false,
+                cancelTask: false
+            )
         } catch {
             let message = "工具调用失败：\(error.localizedDescription)"
             viewModel.setContent(for: assistantID, text: message)
             viewModel.setStatus(for: assistantID, status: .failed(error.localizedDescription))
-            updateMessageUI(id: assistantID, shouldPinToBottom: false)
+            updateMessageUIIfVisible(id: assistantID, shouldPinToBottom: false)
             viewModel.save()
-            currentToolTask = nil
-            stopCurrentStream(flushPending: true)
+            finishGeneration(
+                conversationID: conversationID,
+                assistantID: assistantID,
+                flushPending: true,
+                cancelTask: false
+            )
         }
     }
 
@@ -372,7 +450,7 @@ final class ChatViewController: UIViewController {
         }
     }
 
-    private func shouldAutoPinToBottomForToolResult() -> Bool {
+    private func shouldAutoPinToBottomDuringGeneration() -> Bool {
         !userIsInteracting && isNearBottom(tolerance: 150)
     }
 
@@ -532,29 +610,73 @@ final class ChatViewController: UIViewController {
 
     private func updateSendButtonState() {
         let hasText = !inputTextView.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        sendButton.configuration?.title = isStreaming ? "停止" : "发送"
-        sendButton.isEnabled = isStreaming || hasText
+        let isCurrentConversationStreaming = isConversationStreaming(viewModel.currentConversationID)
+        sendButton.configuration?.title = isCurrentConversationStreaming ? "停止" : "发送"
+        sendButton.isEnabled = isCurrentConversationStreaming || hasText
         sendButton.alpha = sendButton.isEnabled ? 1 : 0.45
     }
 
-    private func stopCurrentStream(flushPending: Bool) {
-        currentToolTask?.cancel()
-        currentToolTask = nil
-        if let currentStreamingAssistantID {
-            if flushPending {
-                flushContinuationPrefixFilterIfNeeded(for: currentStreamingAssistantID)
-                streamTextAnimator.flush(id: currentStreamingAssistantID)
-            } else {
-                continuationPrefixFilters.removeValue(forKey: currentStreamingAssistantID)
-                streamTextAnimator.discard(id: currentStreamingAssistantID)
-            }
-            streamingLayoutStates.removeValue(forKey: currentStreamingAssistantID)
+    private func isConversationStreaming(_ conversationID: UUID) -> Bool {
+        activeAssistantIDByConversationID[conversationID] != nil
+    }
+
+    private func registerActiveGeneration(conversationID: UUID, assistantID: UUID) {
+        activeAssistantIDByConversationID[conversationID] = assistantID
+        activeConversationIDByAssistantID[assistantID] = conversationID
+    }
+
+    private func updateMessageUIIfVisible(id: UUID, shouldPinToBottom: Bool) {
+        guard viewModel.conversationID(containingMessageID: id) == viewModel.currentConversationID else { return }
+        let shouldPin = shouldPinToBottom && shouldAutoPinToBottomDuringGeneration()
+        updateMessageUI(id: id, shouldPinToBottom: shouldPin)
+    }
+
+    private func finishGeneration(
+        conversationID: UUID,
+        assistantID: UUID,
+        flushPending: Bool,
+        cancelTask: Bool
+    ) {
+        if cancelTask {
+            toolTasksByConversationID[conversationID]?.cancel()
         }
-        streamClient.stop()
-        throttler.stop(flushPending: flushPending)
+        toolTasksByConversationID[conversationID] = nil
+
+        if flushPending {
+            flushContinuationPrefixFilterIfNeeded(for: assistantID)
+            streamTextAnimator.flush(id: assistantID)
+        } else {
+            continuationPrefixFilters.removeValue(forKey: assistantID)
+            streamTextAnimator.discard(id: assistantID)
+        }
+
+        streamingLayoutStates.removeValue(forKey: assistantID)
+        streamClientsByConversationID[conversationID]?.stop()
+        streamClientsByConversationID[conversationID] = nil
+        activeAssistantIDByConversationID[conversationID] = nil
+        activeConversationIDByAssistantID[assistantID] = nil
+        if conversationID == viewModel.currentConversationID {
+            throttler.stop(
+                flushPending: flushPending,
+                shouldPinToBottom: shouldAutoPinToBottomDuringGeneration()
+            )
+            updateSendButtonState()
+        }
         viewModel.save()
-        isStreaming = false
-        currentStreamingAssistantID = nil
+    }
+
+    private func cancelGenerationIfNeeded(for conversationID: UUID, flushPending: Bool) {
+        guard let assistantID = activeAssistantIDByConversationID[conversationID] else { return }
+        finishGeneration(
+            conversationID: conversationID,
+            assistantID: assistantID,
+            flushPending: flushPending,
+            cancelTask: true
+        )
+    }
+
+    private func stopCurrentStream(flushPending: Bool) {
+        cancelGenerationIfNeeded(for: viewModel.currentConversationID, flushPending: flushPending)
         updateSendButtonState()
     }
 
@@ -599,12 +721,17 @@ final class ChatViewController: UIViewController {
         )
     }
 
-    private func makeContinuationRequest() -> ChatProviderRequest {
-        let baseRequest = viewModel.chatProviderRequest(systemPrompt: systemPromptWithMemory())
+    private func makeContinuationRequest(conversationID: UUID? = nil) -> ChatProviderRequest {
+        let baseRequest = viewModel.chatProviderRequest(
+            systemPrompt: systemPromptWithMemory(),
+            conversationID: conversationID
+        )
         let continuationPrompt = """
         请从你上一条 assistant 回复的最后一个字符之后继续输出。
         不要重复已经输出过的任何标题、段落、表格行、代码块或最后一句话。
         不要重写开头，不要解释原因，直接续写未完成内容。
+        保持答案完整，但只完成原本回答范围内的内容；不要新开额外主题、附录、延伸讨论或无关章节。
+        如果主体内容已经基本完整，请自然收束，补齐必要结论即可，不要为了继续而继续扩展。
         如果正在输出数据表格、对比表或参数表，请使用标准 Markdown 表格语法。
         如果正在输出流程、结构、时间线、坐标或层级示意图，可以使用 ASCII diagram，但必须放在代码块中。
         不要用 ASCII/框线图模拟数据表格。
@@ -618,8 +745,14 @@ final class ChatViewController: UIViewController {
     }
 
     private func cancelCurrentStream() {
-        guard isStreaming, let assistantID = currentStreamingAssistantID else { return }
-        stopCurrentStream(flushPending: true)
+        let conversationID = viewModel.currentConversationID
+        guard let assistantID = activeAssistantIDByConversationID[conversationID] else { return }
+        finishGeneration(
+            conversationID: conversationID,
+            assistantID: assistantID,
+            flushPending: true,
+            cancelTask: true
+        )
         viewModel.setStatus(for: assistantID, status: .canceled)
         streamingLayoutStates.removeValue(forKey: assistantID)
         updateMessageUI(id: assistantID, shouldPinToBottom: false)
@@ -627,21 +760,28 @@ final class ChatViewController: UIViewController {
     }
 
     func continueGeneration(for assistantID: UUID) {
-        guard !isStreaming,
+        let conversationID = viewModel.currentConversationID
+        guard !isConversationStreaming(conversationID),
               viewModel.message(id: assistantID)?.status == .needsContinuation
         else {
             return
         }
 
-        let request = makeContinuationRequest()
+        let request = makeContinuationRequest(conversationID: conversationID)
 
-        currentStreamingAssistantID = assistantID
-        isStreaming = true
+        registerActiveGeneration(conversationID: conversationID, assistantID: assistantID)
         viewModel.setStatus(for: assistantID, status: .streaming)
-        updateMessageUI(id: assistantID, shouldPinToBottom: true)
+        updateMessageUIIfVisible(
+            id: assistantID,
+            shouldPinToBottom: shouldAutoPinToBottomDuringGeneration()
+        )
         updateSendButtonState()
         prepareContinuationPrefixFilter(for: assistantID)
-        startAssistantStream(request: request, assistantID: assistantID)
+        startAssistantStream(
+            request: request,
+            conversationID: conversationID,
+            assistantID: assistantID
+        )
     }
 
     private func isContinuePrompt(_ text: String) -> Bool {
@@ -669,7 +809,6 @@ final class ChatViewController: UIViewController {
     }
 
     private func startNewConversation() {
-        stopCurrentStream(flushPending: false)
         _ = viewModel.startNewConversation()
         reloadConversationMessages(scrollToBottom: true)
         updateConversationTitle()
@@ -679,10 +818,23 @@ final class ChatViewController: UIViewController {
     }
 
     private func switchConversation(to id: UUID) {
-        stopCurrentStream(flushPending: false)
         guard viewModel.selectConversation(id: id) else { return }
         reloadConversationMessages(scrollToBottom: true)
         updateConversationTitle()
+        updateSendButtonState()
+    }
+
+    @discardableResult
+    private func deleteConversation(id: UUID) -> [ConversationSummary] {
+        cancelGenerationIfNeeded(for: id, flushPending: false)
+        guard viewModel.deleteConversation(id: id) else {
+            return viewModel.conversationSummaries()
+        }
+
+        reloadConversationMessages(scrollToBottom: true)
+        updateConversationTitle()
+        updateSendButtonState()
+        return viewModel.conversationSummaries()
     }
 }
 
@@ -835,7 +987,7 @@ extension ChatViewController {
 
     @objc
     private func didTapSend() {
-        if isStreaming {
+        if isConversationStreaming(viewModel.currentConversationID) {
             cancelCurrentStream()
             return
         }
@@ -860,6 +1012,9 @@ extension ChatViewController {
             },
             onCreateConversation: { [weak self] in
                 self?.startNewConversation()
+            },
+            onDeleteConversation: { [weak self] conversationID in
+                self?.deleteConversation(id: conversationID) ?? []
             }
         )
 

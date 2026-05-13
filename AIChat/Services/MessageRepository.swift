@@ -25,14 +25,16 @@ struct LocalConversationRepository: ConversationRepository {
             return [Conversation()]
         }
 
-        if conversations.isEmpty {
+        let conversationsWithMessages = conversations.filter { !$0.messages.isEmpty }
+        if conversationsWithMessages.isEmpty {
             return [Conversation()]
         }
-        return conversations.sorted { $0.updatedAt > $1.updatedAt }
+        return conversationsWithMessages.sorted { $0.updatedAt > $1.updatedAt }
     }
 
     func saveConversations(_ conversations: [Conversation]) {
-        guard let data = try? encoder.encode(conversations) else { return }
+        let conversationsWithMessages = conversations.filter { !$0.messages.isEmpty }
+        guard let data = try? encoder.encode(conversationsWithMessages) else { return }
         defaults.set(data, forKey: key)
     }
 }

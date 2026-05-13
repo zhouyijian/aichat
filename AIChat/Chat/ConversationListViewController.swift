@@ -12,15 +12,18 @@ final class ConversationListViewController: UIViewController {
     private var summaries: [ConversationSummary]
     private let onSelectConversation: (UUID) -> Void
     private let onCreateConversation: () -> Void
+    private let onDeleteConversation: (UUID) -> [ConversationSummary]
 
     init(
         summaries: [ConversationSummary],
         onSelectConversation: @escaping (UUID) -> Void,
-        onCreateConversation: @escaping () -> Void
+        onCreateConversation: @escaping () -> Void,
+        onDeleteConversation: @escaping (UUID) -> [ConversationSummary]
     ) {
         self.summaries = summaries
         self.onSelectConversation = onSelectConversation
         self.onCreateConversation = onCreateConversation
+        self.onDeleteConversation = onDeleteConversation
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -105,5 +108,24 @@ extension ConversationListViewController: UITableViewDelegate {
         let item = summaries[indexPath.row]
         onSelectConversation(item.id)
         dismiss(animated: true)
+    }
+
+    func tableView(
+        _ tableView: UITableView,
+        trailingSwipeActionsConfigurationForRowAt indexPath: IndexPath
+    ) -> UISwipeActionsConfiguration? {
+        let delete = UIContextualAction(style: .destructive, title: "删除") { [weak self] _, _, completion in
+            guard let self else {
+                completion(false)
+                return
+            }
+
+            let item = self.summaries[indexPath.row]
+            self.summaries = self.onDeleteConversation(item.id)
+            self.tableView.reloadData()
+            completion(true)
+        }
+
+        return UISwipeActionsConfiguration(actions: [delete])
     }
 }

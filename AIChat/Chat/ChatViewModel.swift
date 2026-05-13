@@ -75,15 +75,14 @@ extension ChatViewModel {
     }
 
     func message(id: UUID) -> Message? {
-        guard
-            let index = currentMessageIndexByID[id],
-            let conversation = currentConversation,
-            conversation.messages.indices.contains(index)
-        else {
-            return nil
+        if let index = currentMessageIndexByID[id],
+           let conversation = currentConversation,
+           conversation.messages.indices.contains(index) {
+            return conversation.messages[index]
         }
 
-        return conversation.messages[index]
+        guard let location = messageLocation(id: id) else { return nil }
+        return conversations[location.conversationIndex].messages[location.messageIndex]
     }
 
     func chatItem(at indexPath: IndexPath) -> ChatItem? {
@@ -140,6 +139,7 @@ extension ChatViewModel {
 extension ChatViewModel {
     func conversationSummaries() -> [ConversationSummary] {
         conversations
+            .filter { hasHistory($0) }
             .sorted(by: { $0.updatedAt > $1.updatedAt })
             .map { conversation in
                 ConversationSummary(
@@ -155,6 +155,7 @@ extension ChatViewModel {
     @discardableResult
     func startNewConversation() -> Conversation {
         let conversation = Conversation()
+        conversations.removeAll { !hasHistory($0) }
         conversations.insert(conversation, at: 0)
         currentConversationID = conversation.id
         currentConversationIndex = 0
@@ -162,7 +163,6 @@ extension ChatViewModel {
         rebuildCurrentMessageIndex()
         rebuildCurrentChatItems()
         invalidateAllHeights()
-        save()
         return conversation
     }
 
@@ -177,10 +177,29 @@ extension ChatViewModel {
         return true
     }
 
-    func chatProviderRequest(systemPrompt: String) -> ChatProviderRequest {
-        var requestMessages: [ChatProviderMessage] = []
+    func hasConversation(id: UUID) -> Bool {
+        conversationIndexByID[id] != nil
+    }
 
-        for message in messages {
+    func conversationID(containingMessageID messageID: UUID) -> UUID? {
+        guard let location = messageLocation(id: messageID) else { return nil }
+        return conversations[location.conversationIndex].id
+    }
+
+    func chatProviderRequest(systemPrompt: String, conversationID: UUID? = nil) -> ChatProviderRequest {
+        var requestMessages: [ChatProviderMessage] = []
+        let sourceMessages: [Message]
+
+        if let conversationID {
+            guard let index = conversationIndexByID[conversationID] else {
+                return ChatProviderRequest(systemPrompt: systemPrompt, messages: [])
+            }
+            sourceMessages = conversations[index].messages
+        } else {
+            sourceMessages = messages
+        }
+
+        for message in sourceMessages {
             guard let role = apiRole(from: message.role),
                   let content = normalizedHistoryContent(from: message),
                   !content.isEmpty else { continue }
@@ -191,7 +210,32 @@ extension ChatViewModel {
     }
 
     func save() {
-        repository.saveConversations(conversations)
+        repository.saveConversations(conversations.filter { hasHistory($0) })
+    }
+
+    @discardableResult
+    func deleteConversation(id: UUID) -> Bool {
+        guard let index = conversationIndexByID[id] else { return false }
+
+        let deletingCurrentConversation = id == currentConversationID
+        conversations.remove(at: index)
+
+        if conversations.isEmpty {
+            conversations = [Conversation()]
+        }
+
+        if deletingCurrentConversation {
+            currentConversationIndex = 0
+            currentConversationID = conversations[0].id
+        }
+
+        rebuildConversationIndex()
+        refreshCurrentConversationIndex()
+        rebuildCurrentMessageIndex()
+        rebuildCurrentChatItems()
+        invalidateAllHeights()
+        save()
+        return true
     }
 }
 
@@ -220,21 +264,34 @@ extension ChatViewModel {
         mutate: (inout Message) -> Void
     ) -> Bool {
         var updated = false
+        var updatedConversationID: UUID?
+        var updatedCurrentConversation = false
 
-        mutateCurrentConversation(persist: persist, touchUpdatedAt: persist) { conversation in
-            guard let idx = currentMessageIndexByID[id] else { return }
-            mutate(&conversation.messages[idx])
-            updated = true
+        guard let location = messageLocation(id: id) else { return false }
+        updatedConversationID = conversations[location.conversationIndex].id
+        updatedCurrentConversation = updatedConversationID == currentConversationID
+
+        mutate(&conversations[location.conversationIndex].messages[location.messageIndex])
+        updated = true
+
+        if persist {
+            conversations[location.conversationIndex].updatedAt = Date()
+            conversations.sort(by: { $0.updatedAt > $1.updatedAt })
+            refreshCurrentConversationIndex()
         }
 
         guard updated else { return false }
-        if let message = message(id: id) {
+        if updatedCurrentConversation, let message = message(id: id) {
+            rebuildCurrentMessageIndex()
             let items = cacheItems(for: message)
             if !replaceRenderedItems(for: message.id, with: items) {
                 rebuildRenderedItemsFromMessageCache()
             }
-        } else {
+        } else if updatedCurrentConversation {
             rebuildRenderedItemsFromMessageCache()
+        }
+        if persist {
+            save()
         }
         return true
     }
@@ -908,11 +965,32 @@ private extension ChatViewModel {
 
 // MARK: - Helpers
 private extension ChatViewModel {
+    struct MessageLocation {
+        let conversationIndex: Int
+        let messageIndex: Int
+    }
+
     var currentConversation: Conversation? {
         guard conversations.indices.contains(currentConversationIndex) else { return nil }
         let conversation = conversations[currentConversationIndex]
         guard conversation.id == currentConversationID else { return nil }
         return conversation
+    }
+
+    func messageLocation(id: UUID) -> MessageLocation? {
+        if let messageIndex = currentMessageIndexByID[id],
+           let conversationIndex = resolveCurrentConversationIndex(),
+           conversations[conversationIndex].messages.indices.contains(messageIndex) {
+            return MessageLocation(conversationIndex: conversationIndex, messageIndex: messageIndex)
+        }
+
+        for (conversationIndex, conversation) in conversations.enumerated() {
+            if let messageIndex = conversation.messages.firstIndex(where: { $0.id == id }) {
+                return MessageLocation(conversationIndex: conversationIndex, messageIndex: messageIndex)
+            }
+        }
+
+        return nil
     }
 
     func makeTitle(from content: String) -> String {
@@ -929,6 +1007,10 @@ private extension ChatViewModel {
             return normalized.replacingOccurrences(of: "\n", with: " ")
         }
         return "还没有消息"
+    }
+
+    func hasHistory(_ conversation: Conversation) -> Bool {
+        !conversation.messages.isEmpty
     }
 
     func apiRole(from role: Role) -> ChatProviderMessage.Role? {

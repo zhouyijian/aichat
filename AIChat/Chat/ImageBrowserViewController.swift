@@ -1,4 +1,5 @@
 import UIKit
+import Photos
 import SnapKit
 
 final class ImageBrowserViewController: UIViewController, UIScrollViewDelegate {
@@ -11,9 +12,13 @@ final class ImageBrowserViewController: UIViewController, UIScrollViewDelegate {
     private let imageView = UIImageView()
     private let captionLabel = UILabel()
     private let closeButton = UIButton(type: .system)
+    private let saveButton = UIButton(type: .system)
     private let placeholderLabel = UILabel()
     private var task: URLSessionDataTask?
     private var didSetInitialZoom = false
+    private var displayedImageData: Data?
+    private var displayedImageFileURL: URL?
+    private var isSaving = false
 
     init(imageURL: URL, image: UIImage?, caption: String?) {
         self.imageURL = imageURL
@@ -94,10 +99,18 @@ final class ImageBrowserViewController: UIViewController, UIScrollViewDelegate {
         closeButton.accessibilityLabel = "关闭图片浏览"
         closeButton.addTarget(self, action: #selector(dismissBrowser), for: .touchUpInside)
 
+        saveButton.setImage(UIImage(systemName: "square.and.arrow.down"), for: .normal)
+        saveButton.tintColor = .white
+        saveButton.backgroundColor = UIColor.black.withAlphaComponent(0.35)
+        saveButton.layer.cornerRadius = 22
+        saveButton.accessibilityLabel = "保存图片到相册"
+        saveButton.addTarget(self, action: #selector(saveImageToPhotoLibrary), for: .touchUpInside)
+
         view.addSubview(scrollView)
         scrollView.addSubview(imageView)
         view.addSubview(placeholderLabel)
         view.addSubview(captionLabel)
+        view.addSubview(saveButton)
         view.addSubview(closeButton)
 
         scrollView.snp.makeConstraints { make in
@@ -114,6 +127,11 @@ final class ImageBrowserViewController: UIViewController, UIScrollViewDelegate {
         closeButton.snp.makeConstraints { make in
             make.top.equalTo(view.safeAreaLayoutGuide).offset(12)
             make.trailing.equalTo(view.safeAreaLayoutGuide).inset(16)
+            make.width.height.equalTo(44)
+        }
+        saveButton.snp.makeConstraints { make in
+            make.top.equalTo(view.safeAreaLayoutGuide).offset(12)
+            make.leading.equalTo(view.safeAreaLayoutGuide).inset(16)
             make.width.height.equalTo(44)
         }
 
@@ -148,7 +166,7 @@ final class ImageBrowserViewController: UIViewController, UIScrollViewDelegate {
             }
 
             DispatchQueue.main.async { [weak self] in
-                self?.display(image: image)
+                self?.display(image: image, data: data, fileURL: nil)
             }
         }
         task?.resume()
@@ -166,14 +184,16 @@ final class ImageBrowserViewController: UIViewController, UIScrollViewDelegate {
             }
 
             DispatchQueue.main.async { [weak self] in
-                self?.display(image: image)
+                self?.display(image: image, data: data, fileURL: fileURL)
             }
         }
     }
 
-    private func display(image: UIImage) {
+    private func display(image: UIImage, data: Data? = nil, fileURL: URL? = nil) {
         placeholderLabel.isHidden = true
         imageView.image = image
+        displayedImageData = data
+        displayedImageFileURL = fileURL
         imageView.frame = CGRect(origin: .zero, size: image.size)
         scrollView.contentSize = image.size
         didSetInitialZoom = false
@@ -242,11 +262,83 @@ final class ImageBrowserViewController: UIViewController, UIScrollViewDelegate {
         let shouldHide = !closeButton.isHidden
         UIView.animate(withDuration: 0.2) {
             self.closeButton.alpha = shouldHide ? 0 : 1
+            self.saveButton.alpha = shouldHide ? 0 : 1
             self.captionLabel.alpha = shouldHide ? 0 : 1
         } completion: { _ in
             self.closeButton.isHidden = shouldHide
+            self.saveButton.isHidden = shouldHide
             self.captionLabel.isHidden = shouldHide || (self.caption?.isEmpty ?? true)
         }
+    }
+
+    @objc private func saveImageToPhotoLibrary() {
+        guard !isSaving, imageView.image != nil else { return }
+        isSaving = true
+        saveButton.isEnabled = false
+
+        PHPhotoLibrary.requestAuthorization(for: .addOnly) { [weak self] status in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                switch status {
+                case .authorized, .limited:
+                    self.performPhotoLibrarySave()
+                case .denied, .restricted:
+                    self.finishSaving()
+                    self.showAlert(title: "无法保存图片", message: "请在系统设置中允许 AIChat 添加照片到相册。")
+                case .notDetermined:
+                    self.finishSaving()
+                @unknown default:
+                    self.finishSaving()
+                    self.showAlert(title: "无法保存图片", message: "相册权限状态异常，请稍后重试。")
+                }
+            }
+        }
+    }
+
+    private func performPhotoLibrarySave() {
+        let fileURL = displayedImageFileURL
+        let data = displayedImageData
+        let image = imageView.image
+
+        PHPhotoLibrary.shared().performChanges {
+            if let fileURL {
+                let request = PHAssetCreationRequest.forAsset()
+                request.addResource(with: .photo, fileURL: fileURL, options: nil)
+                return
+            }
+
+            if let data {
+                let request = PHAssetCreationRequest.forAsset()
+                request.addResource(with: .photo, data: data, options: nil)
+                return
+            }
+
+            if let image {
+                PHAssetChangeRequest.creationRequestForAsset(from: image)
+            }
+        } completionHandler: { [weak self] success, error in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.finishSaving()
+                if success {
+                    self.showAlert(title: "已保存", message: "图片已保存到系统相册。")
+                } else {
+                    let message = error?.localizedDescription ?? "保存失败，请稍后重试。"
+                    self.showAlert(title: "无法保存图片", message: message)
+                }
+            }
+        }
+    }
+
+    private func finishSaving() {
+        isSaving = false
+        saveButton.isEnabled = true
+    }
+
+    private func showAlert(title: String, message: String) {
+        let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "好", style: .default))
+        present(alert, animated: true)
     }
 
     @objc private func dismissBrowser() {

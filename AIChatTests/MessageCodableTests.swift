@@ -158,6 +158,7 @@ final class ToolUseClientTests: XCTestCase {
 
     func testGenerateImageToolMapsAPIResponseToImageBlocksAndStructuredData() async throws {
         MockURLProtocol.requestHandler = { request in
+            XCTAssertGreaterThanOrEqual(request.timeoutInterval, 300)
             let response = HTTPURLResponse(
                 url: try XCTUnwrap(request.url),
                 statusCode: 200,
@@ -218,6 +219,78 @@ final class ToolUseClientTests: XCTestCase {
         XCTAssertTrue(url.hasPrefix("\(GeneratedImageStore.urlScheme):///"))
         XCTAssertTrue(GeneratedImageStore.fileExists(forReference: url))
         XCTAssertEqual(alt, "一只戴着圆框眼镜、表情专注的猫。")
+    }
+
+    func testGenerateImageToolMapsGenerationTimeoutToFriendlyMessage() async throws {
+        MockURLProtocol.requestHandler = { _ in
+            throw URLError(.timedOut)
+        }
+
+        let tool = GenerateImageTool(
+            client: MiniMaxImageGenerationClient(
+                configProvider: Self.makeConfig,
+                session: Self.mockSession()
+            ),
+            imageDataLoader: { _ in Data() }
+        )
+
+        do {
+            _ = try await tool.execute(
+                input: .object([
+                    "prompt": .string("一只猫"),
+                    "caption": .string("一只猫")
+                ])
+            )
+            XCTFail("Expected timeout to throw")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("图片生成超时"))
+        }
+    }
+
+    func testGenerateImageToolMapsDownloadTimeoutToFriendlyMessage() async throws {
+        MockURLProtocol.requestHandler = { request in
+            let response = HTTPURLResponse(
+                url: try XCTUnwrap(request.url),
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            let body = """
+            {
+              "id": "img_timeout",
+              "data": {
+                "image_urls": ["https://cdn.example.com/generated.png"]
+              },
+              "base_resp": {
+                "status_code": 0,
+                "status_msg": "success"
+              }
+            }
+            """.data(using: .utf8)!
+            return (response, body)
+        }
+
+        let tool = GenerateImageTool(
+            client: MiniMaxImageGenerationClient(
+                configProvider: Self.makeConfig,
+                session: Self.mockSession()
+            ),
+            imageDataLoader: { _ in
+                throw ToolExecutionError.executionFailed("图片生成成功，但下载图片超时，请稍后重试")
+            }
+        )
+
+        do {
+            _ = try await tool.execute(
+                input: .object([
+                    "prompt": .string("一只猫"),
+                    "caption": .string("一只猫")
+                ])
+            )
+            XCTFail("Expected timeout to throw")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("下载图片超时"))
+        }
     }
 
     func testGenerateImageToolRejectsNonImageDownload() async throws {

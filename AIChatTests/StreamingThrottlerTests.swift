@@ -74,4 +74,24 @@ final class StreamingThrottlerTests: XCTestCase {
         XCTAssertEqual(events.first?.0, messageID)
         XCTAssertEqual(events.first?.1, false)
     }
+
+    func testStopCanFlushPendingChangeWithoutRestoringBottom() {
+        let messageID = UUID()
+        var events: [(UUID, Bool)] = []
+
+        let throttler = StreamingThrottler(
+            intervalNs: 1_000_000_000,
+            shouldPinToBottom: { true },
+            onTick: { id, shouldPin in
+                events.append((id, shouldPin))
+            }
+        )
+
+        throttler.markChanged(id: messageID)
+        throttler.stop(flushPending: true, shouldPinToBottom: false)
+
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events.first?.0, messageID)
+        XCTAssertEqual(events.first?.1, false)
+    }
 }

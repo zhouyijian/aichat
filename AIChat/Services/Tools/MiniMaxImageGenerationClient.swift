@@ -8,12 +8,22 @@ struct GeneratedImageBatch: Sendable {
 }
 
 final class MiniMaxImageGenerationClient {
+    private static let requestTimeout: TimeInterval = 300
+    private static let resourceTimeout: TimeInterval = 600
+    private static let defaultSession: URLSession = {
+        let configuration = URLSessionConfiguration.default
+        configuration.timeoutIntervalForRequest = requestTimeout
+        configuration.timeoutIntervalForResource = resourceTimeout
+        configuration.waitsForConnectivity = true
+        return URLSession(configuration: configuration)
+    }()
+
     private let configProvider: () throws -> StreamingServiceConfig
     private let session: URLSession
 
     init(
         configProvider: @escaping () throws -> StreamingServiceConfig = StreamingServiceConfig.loadLocal,
-        session: URLSession = .shared
+        session: URLSession = MiniMaxImageGenerationClient.defaultSession
     ) {
         self.configProvider = configProvider
         self.session = session
@@ -35,8 +45,9 @@ final class MiniMaxImageGenerationClient {
         request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(requestBody)
+        request.timeoutInterval = Self.requestTimeout
 
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await data(for: request)
         try Self.validate(response: response, data: data)
 
         let decoded = try JSONDecoder().decode(MiniMaxImageGenerationResponse.self, from: data)
@@ -56,6 +67,27 @@ final class MiniMaxImageGenerationClient {
             successCount: decoded.metadata?.successCount,
             failedCount: decoded.metadata?.failedCount
         )
+    }
+
+    private func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+        do {
+            return try await session.data(for: request)
+        } catch {
+            if Task.isCancelled {
+                throw CancellationError()
+            }
+            if let urlError = error as? URLError {
+                switch urlError.code {
+                case .timedOut:
+                    throw ToolExecutionError.executionFailed("图片生成超时，请稍后重试或换一个更简单的提示词")
+                case .cancelled:
+                    throw ToolExecutionError.executionFailed("图片生成请求被系统取消，请检查网络后重试")
+                default:
+                    break
+                }
+            }
+            throw error
+        }
     }
 
     private static func validate(response: URLResponse, data: Data) throws {
@@ -126,4 +158,3 @@ private struct MiniMaxImageGenerationResponse: Decodable {
         case baseResp = "base_resp"
     }
 }
-

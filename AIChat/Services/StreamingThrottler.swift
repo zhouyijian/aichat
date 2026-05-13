@@ -56,10 +56,10 @@ final class StreamingThrottler {
     }
 
     /// 流式结束/页面退出时调用
-    func stop(flushPending: Bool = true) {
+    func stop(flushPending: Bool = true, shouldPinToBottom: Bool? = nil) {
         if flushPending, hasPendingChanges, let id = pendingID {
             hasPendingChanges = false
-            onTick(id, shouldPinToBottomForCurrentStream)
+            onTick(id, shouldPinToBottom ?? shouldPinToBottomForCurrentStream)
         }
 
         task?.cancel()

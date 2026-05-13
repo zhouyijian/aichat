@@ -2,6 +2,16 @@ import Foundation
 
 struct GenerateImageTool: ChatTool {
     let name = "generate_image"
+    private static let imageDownloadTimeout: TimeInterval = 300
+    private static let imageDownloadResourceTimeout: TimeInterval = 600
+    private static let imageDownloadSession: URLSession = {
+        let configuration = URLSessionConfiguration.default
+        configuration.timeoutIntervalForRequest = imageDownloadTimeout
+        configuration.timeoutIntervalForResource = imageDownloadResourceTimeout
+        configuration.waitsForConnectivity = true
+        return URLSession(configuration: configuration)
+    }()
+
     private let client: MiniMaxImageGenerationClient
     private let imageDataLoader: @Sendable (URL) async throws -> Data
 
@@ -97,7 +107,30 @@ struct GenerateImageTool: ChatTool {
     }
 
     private static func defaultImageDataLoader(url: URL) async throws -> Data {
-        let (data, response) = try await URLSession.shared.data(from: url)
+        var request = URLRequest(url: url)
+        request.timeoutInterval = imageDownloadTimeout
+
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await imageDownloadSession.data(for: request)
+        } catch {
+            if Task.isCancelled {
+                throw CancellationError()
+            }
+            if let urlError = error as? URLError {
+                switch urlError.code {
+                case .timedOut:
+                    throw ToolExecutionError.executionFailed("图片生成成功，但下载图片超时，请稍后重试")
+                case .cancelled:
+                    throw ToolExecutionError.executionFailed("图片生成成功，但图片下载被系统取消，请检查网络后重试")
+                default:
+                    break
+                }
+            }
+            throw error
+        }
+
         if let http = response as? HTTPURLResponse,
            !(200..<300).contains(http.statusCode) {
             throw ToolExecutionError.executionFailed("图片生成成功但图片下载失败（HTTP \(http.statusCode)）")
