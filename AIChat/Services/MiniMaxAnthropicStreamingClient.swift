@@ -14,6 +14,9 @@ struct StreamingServiceConfig {
     let model: String
     let maxTokens: Int
     let temperature: Double?
+    let toolPlannerMaxTokens: Int
+    let imageEndpointURL: URL
+    let imageModel: String
 
     nonisolated static func loadLocal() throws -> StreamingServiceConfig {
         guard let url = Bundle.main.url(forResource: "LocalConfig", withExtension: "plist") else {
@@ -35,8 +38,18 @@ struct StreamingServiceConfig {
 
         let maxTokens = plist["StreamingMaxTokens"] as? Int ?? 2048
         let temperature = plist["StreamingTemperature"] as? Double
+        let toolPlannerMaxTokens = plist["ToolPlannerMaxTokens"] as? Int ?? 1024
+        let imageEndpoint = (plist["ImageGenerationEndpointURL"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            ?? "https://api.minimaxi.com/v1/image_generation"
+        let imageModel = (plist["ImageGenerationModel"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            ?? "image-01"
         guard (1...2048).contains(maxTokens),
-              temperature.map({ $0 > 0 && $0 <= 1 }) ?? true else {
+              (128...4096).contains(toolPlannerMaxTokens),
+              temperature.map({ $0 > 0 && $0 <= 1 }) ?? true,
+              let imageEndpointURL = URL(string: imageEndpoint),
+              !imageModel.isEmpty else {
             throw StreamingServiceConfigError.invalidFile
         }
 
@@ -45,7 +58,10 @@ struct StreamingServiceConfig {
             endpointURL: endpointURL,
             model: model,
             maxTokens: maxTokens,
-            temperature: temperature
+            temperature: temperature,
+            toolPlannerMaxTokens: toolPlannerMaxTokens,
+            imageEndpointURL: imageEndpointURL,
+            imageModel: imageModel
         )
     }
 }
@@ -59,7 +75,7 @@ enum StreamingServiceConfigError: LocalizedError {
         case .missingFile:
             return "缺少本地配置文件 LocalConfig.plist"
         case .invalidFile:
-            return "LocalConfig.plist 配置不完整，请检查 StreamingAPIKey、StreamingEndpointURL、StreamingModel、StreamingMaxTokens、StreamingTemperature"
+            return "LocalConfig.plist 配置不完整，请检查 StreamingAPIKey、StreamingEndpointURL、StreamingModel、StreamingMaxTokens、StreamingTemperature、ToolPlannerMaxTokens、ImageGenerationEndpointURL、ImageGenerationModel"
         }
     }
 }

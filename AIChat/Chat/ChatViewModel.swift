@@ -288,6 +288,26 @@ extension ChatViewModel {
         }
     }
 
+    func setToolResult(
+        for id: UUID,
+        result: ToolExecutionResult,
+        persist: Bool = true
+    ) {
+        _ = updateMessage(id: id, persist: persist) { message in
+            message.blocks = result.blocks
+            message.reasoningBlocks = []
+            message.thinkRoutingState = ThinkRoutingState()
+            message.toolResult = ToolResultRecord(
+                toolName: result.toolName,
+                ok: result.ok,
+                displayText: result.displayText,
+                structuredData: result.structuredData
+            )
+            message.status = result.ok ? .success : .failed(result.displayText)
+            message.advanceLayoutVersion()
+        }
+    }
+
     @discardableResult
     func toggleReasoning(for id: UUID) -> Bool {
         updateMessage(id: id, persist: false) { message in

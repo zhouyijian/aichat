@@ -8,6 +8,10 @@
 import UIKit
 import SnapKit
 
+private enum ToolConfirmationCancellation: Error {
+    case canceled
+}
+
 final class ChatViewController: UIViewController {
 
     struct StreamingLayoutState: Equatable {
@@ -19,6 +23,11 @@ final class ChatViewController: UIViewController {
     let viewModel = ChatViewModel(repository: LocalConversationRepository())
     private let systemPrompt = "你是一个简洁、专业的中文助手。数据表格、对比表、参数表必须使用标准 Markdown 表格。需要画流程、结构、时间线、坐标、层级等示意图时，可以使用 ASCII diagram，但必须放在代码块中。不要用 ASCII/框线图模拟数据表格。"
     private let streamClient = MiniMaxAnthropicStreamingClient()
+    private let toolPlannerClient = ToolPlannerClient()
+    private let toolRegistry = ToolRegistry.makeDefault()
+    private let memoryStore = LocalMemoryStore()
+    private let memoryExtractor = MemoryExtractor()
+    private let memoryContextBuilder = MemoryContextBuilder()
     private let maxTokenHitsBeforeManualContinuation = 3
     private lazy var streamTextAnimator = StreamingTextAnimator { [weak self] id, contentDelta, reasoningDelta in
         guard let self else { return }
@@ -41,6 +50,7 @@ final class ChatViewController: UIViewController {
     private let sendButton = UIButton(type: .system)
     private var inputTextHeightConstraint: Constraint?
     private var currentStreamingAssistantID: UUID?
+    private var currentToolTask: Task<Void, Never>?
     private var continuationPrefixFilters: [UUID: StreamingContinuationPrefixFilter] = [:]
     var streamingLayoutStates: [UUID: StreamingLayoutState] = [:]
 
@@ -246,7 +256,8 @@ final class ChatViewController: UIViewController {
         let userMsg = Message(role: .user, content: trimmed)
         appendMessage(userMsg, scrollToBottom: true)
 
-        let request = viewModel.chatProviderRequest(systemPrompt: systemPrompt)
+        let request = viewModel.chatProviderRequest(systemPrompt: systemPromptWithMemory())
+        persistMemory(userText: trimmed, toolResult: nil)
 
         let assistantMsg = Message(role: .assistant, content: "", status: .pending)
         appendMessage(assistantMsg, scrollToBottom: true)
@@ -255,7 +266,268 @@ final class ChatViewController: UIViewController {
         isStreaming = true
         updateConversationTitle()
         updateSendButtonState()
-        startAssistantStream(request: request, assistantID: assistantMsg.id)
+        startToolPlanningOrStream(
+            request: request,
+            userText: trimmed,
+            assistantID: assistantMsg.id
+        )
+    }
+
+    private func startToolPlanningOrStream(
+        request: ChatProviderRequest,
+        userText: String,
+        assistantID: UUID
+    ) {
+        currentToolTask?.cancel()
+        currentToolTask = Task { @MainActor [weak self] in
+            await self?.planAndExecuteOrStream(
+                request: request,
+                userText: userText,
+                assistantID: assistantID
+            )
+        }
+    }
+
+    @MainActor
+    private func planAndExecuteOrStream(
+        request: ChatProviderRequest,
+        userText: String,
+        assistantID: UUID
+    ) async {
+        do {
+            let routedCalls = ToolIntentRouter.toolCalls(for: userText)
+            if !routedCalls.isEmpty {
+                viewModel.setContent(for: assistantID, text: routedToolStatusText(for: routedCalls))
+                updateMessageUI(id: assistantID, shouldPinToBottom: true)
+
+                let result = try await executeToolCalls(routedCalls, userText: userText)
+                guard !Task.isCancelled else { return }
+
+                let shouldPinToBottom = shouldAutoPinToBottomForToolResult()
+                viewModel.setToolResult(for: assistantID, result: result)
+                updateMessageUI(id: assistantID, shouldPinToBottom: shouldPinToBottom)
+                persistMemory(userText: userText, toolResult: result)
+                viewModel.save()
+                currentToolTask = nil
+                stopCurrentStream(flushPending: true)
+                return
+            }
+
+            let planning = try await toolPlannerClient.plan(
+                request: request,
+                tools: toolRegistry.definitions
+            )
+            guard !Task.isCancelled else { return }
+
+            guard planning.shouldExecuteTool else {
+                currentToolTask = nil
+                startAssistantStream(request: request, assistantID: assistantID)
+                return
+            }
+
+            viewModel.setContent(for: assistantID, text: "正在执行工具...")
+            updateMessageUI(id: assistantID, shouldPinToBottom: true)
+
+            let result = try await executeToolCalls(planning.toolCalls, userText: userText)
+            guard !Task.isCancelled else { return }
+
+            let shouldPinToBottom = shouldAutoPinToBottomForToolResult()
+            viewModel.setToolResult(for: assistantID, result: result)
+            updateMessageUI(id: assistantID, shouldPinToBottom: shouldPinToBottom)
+            persistMemory(userText: userText, toolResult: result)
+            viewModel.save()
+            currentToolTask = nil
+            stopCurrentStream(flushPending: true)
+        } catch ToolConfirmationCancellation.canceled {
+            viewModel.setContent(for: assistantID, text: "已取消操作")
+            viewModel.setStatus(for: assistantID, status: .success)
+            updateMessageUI(id: assistantID, shouldPinToBottom: false)
+            viewModel.save()
+            currentToolTask = nil
+            stopCurrentStream(flushPending: false)
+        } catch is CancellationError {
+            currentToolTask = nil
+            stopCurrentStream(flushPending: false)
+        } catch {
+            let message = "工具调用失败：\(error.localizedDescription)"
+            viewModel.setContent(for: assistantID, text: message)
+            viewModel.setStatus(for: assistantID, status: .failed(error.localizedDescription))
+            updateMessageUI(id: assistantID, shouldPinToBottom: false)
+            viewModel.save()
+            currentToolTask = nil
+            stopCurrentStream(flushPending: true)
+        }
+    }
+
+    private func routedToolStatusText(for calls: [ToolCall]) -> String {
+        switch calls.first?.name {
+        case "generate_image":
+            return "正在生成图片，请稍候..."
+        case "create_reminder":
+            return "正在添加提醒..."
+        case "create_alarm":
+            return "正在设置闹钟..."
+        default:
+            return "正在执行工具..."
+        }
+    }
+
+    private func shouldAutoPinToBottomForToolResult() -> Bool {
+        !userIsInteracting && isNearBottom(tolerance: 150)
+    }
+
+    private func executeToolCalls(_ calls: [ToolCall], userText: String) async throws -> ToolExecutionResult {
+        let cappedCalls = Array(calls.prefix(3))
+        try await confirmToolCallsIfNeeded(cappedCalls)
+
+        var results: [ToolExecutionResult] = []
+        for call in cappedCalls {
+            results.append(try await toolRegistry.execute(enrichedToolCall(call, userText: userText)))
+        }
+
+        guard let first = results.first else {
+            throw ToolExecutionError.executionFailed("模型没有返回可执行工具")
+        }
+
+        guard results.count > 1 else { return first }
+
+        let blocks = results.flatMap(\.blocks)
+        return ToolExecutionResult(
+            toolName: "multiple_tools",
+            ok: results.allSatisfy(\.ok),
+            displayText: results.map(\.displayText).joined(separator: "\n"),
+            blocks: blocks,
+            structuredData: .object([
+                "results": .array(results.map { result in
+                    .object([
+                        "tool": .string(result.toolName),
+                        "ok": .bool(result.ok),
+                        "display_text": .string(result.displayText),
+                        "data": result.structuredData
+                    ])
+                })
+            ])
+        )
+    }
+
+    @MainActor
+    private func confirmToolCallsIfNeeded(_ calls: [ToolCall]) async throws {
+        let callsNeedingConfirmation = calls.filter(requiresConfirmation)
+        guard !callsNeedingConfirmation.isEmpty else { return }
+
+        let confirmed = await presentToolConfirmation(for: callsNeedingConfirmation)
+        guard confirmed else {
+            throw ToolConfirmationCancellation.canceled
+        }
+    }
+
+    private func requiresConfirmation(_ call: ToolCall) -> Bool {
+        call.name == "create_reminder" || call.name == "create_alarm"
+    }
+
+    @MainActor
+    private func presentToolConfirmation(for calls: [ToolCall]) async -> Bool {
+        await withCheckedContinuation { continuation in
+            let title = calls.count == 1 ? confirmationTitle(for: calls[0]) : "确认执行工具"
+            let message = calls.map(confirmationSummary).joined(separator: "\n\n")
+            let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "取消", style: .cancel) { _ in
+                continuation.resume(returning: false)
+            })
+            alert.addAction(UIAlertAction(title: "确认", style: .default) { _ in
+                continuation.resume(returning: true)
+            })
+            present(alert, animated: true)
+        }
+    }
+
+    private func confirmationTitle(for call: ToolCall) -> String {
+        switch call.name {
+        case "create_reminder":
+            return "确认添加提醒"
+        case "create_alarm":
+            return "确认设置闹钟"
+        default:
+            return "确认执行工具"
+        }
+    }
+
+    private func confirmationSummary(for call: ToolCall) -> String {
+        switch call.name {
+        case "create_reminder":
+            let title = call.input["title"]?.stringValue ?? "提醒事项"
+            let dueAt = call.input["due_at"]?.stringValue ?? "未指定时间"
+            let notes = call.input["notes"]?.stringValue
+            return [
+                "提醒事项：\(title)",
+                "时间：\(dueAt)",
+                notes.map { "备注：\($0)" }
+            ].compactMap(\.self).joined(separator: "\n")
+        case "create_alarm":
+            let label = call.input["label"]?.stringValue ?? "闹钟"
+            let fireAt = call.input["fire_at"]?.stringValue ?? "未指定时间"
+            let repeatRule = call.input["repeat_rule"]?.stringValue ?? "none"
+            return [
+                "闹钟：\(label)",
+                "时间：\(fireAt)",
+                "重复：\(displayRepeatRule(repeatRule))"
+            ].joined(separator: "\n")
+        default:
+            return "工具：\(call.name)"
+        }
+    }
+
+    private func displayRepeatRule(_ repeatRule: String) -> String {
+        switch repeatRule {
+        case "daily":
+            return "每天"
+        case "weekdays":
+            return "工作日"
+        case "weekends":
+            return "周末"
+        default:
+            return "不重复"
+        }
+    }
+
+    private func enrichedToolCall(_ call: ToolCall, userText: String) -> ToolCall {
+        guard call.name == "generate_image",
+              var input = call.input.objectValue else {
+            return call
+        }
+
+        let caption = input["caption"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if caption?.isEmpty != false || !containsChinese(caption ?? "") {
+            input["caption"] = .string(userText.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+
+        let prompt = input["prompt"]?.stringValue ?? userText
+        let noEnglishTextInstruction = "画面中不要出现英文单词、英文字母、水印、Logo 或可读英文；除非用户明确要求英文文字，如需招牌或界面文字请使用中文或抽象符号。"
+        if !prompt.contains(noEnglishTextInstruction) {
+            input["prompt"] = .string("\(prompt)\n\(noEnglishTextInstruction)")
+        }
+
+        return ToolCall(id: call.id, name: call.name, input: .object(input))
+    }
+
+    private func containsChinese(_ text: String) -> Bool {
+        text.unicodeScalars.contains { scalar in
+            (0x4E00...0x9FFF).contains(Int(scalar.value)) ||
+            (0x3400...0x4DBF).contains(Int(scalar.value))
+        }
+    }
+
+    private func persistMemory(userText: String, toolResult: ToolExecutionResult?) {
+        let updated = memoryExtractor.updatedRecords(
+            existing: memoryStore.load(),
+            userText: userText,
+            toolResult: toolResult
+        )
+        memoryStore.save(updated)
+    }
+
+    private func systemPromptWithMemory() -> String {
+        systemPrompt + memoryContextBuilder.context(from: memoryStore.load())
     }
 
     private func updateSendButtonState() {
@@ -266,6 +538,8 @@ final class ChatViewController: UIViewController {
     }
 
     private func stopCurrentStream(flushPending: Bool) {
+        currentToolTask?.cancel()
+        currentToolTask = nil
         if let currentStreamingAssistantID {
             if flushPending {
                 flushContinuationPrefixFilterIfNeeded(for: currentStreamingAssistantID)
@@ -326,7 +600,7 @@ final class ChatViewController: UIViewController {
     }
 
     private func makeContinuationRequest() -> ChatProviderRequest {
-        let baseRequest = viewModel.chatProviderRequest(systemPrompt: systemPrompt)
+        let baseRequest = viewModel.chatProviderRequest(systemPrompt: systemPromptWithMemory())
         let continuationPrompt = """
         请从你上一条 assistant 回复的最后一个字符之后继续输出。
         不要重复已经输出过的任何标题、段落、表格行、代码块或最后一句话。

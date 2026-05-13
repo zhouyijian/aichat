@@ -2,6 +2,14 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>用于根据你的对话请求创建提醒事项。</string>
+	<key>NSRemindersUsageDescription</key>
+	<string>用于根据你的对话请求创建提醒事项。</string>
+	<key>NSRemindersWriteOnlyAccessUsageDescription</key>
+	<string>用于根据你的对话请求创建提醒事项。</string>
+	<key>NSUserNotificationsUsageDescription</key>
+	<string>用于根据你的对话请求发送闹钟和提醒通知。</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

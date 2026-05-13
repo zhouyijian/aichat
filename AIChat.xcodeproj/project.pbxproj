@@ -75,6 +75,17 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		7A85E67E834C9F3F114821F6 /* AIChatTests */ = {
+			isa = PBXGroup;
+			children = (
+				5AE1918AC79B5B6293A60127 /* StreamingContinuationPrefixFilterTests.swift */,
+				E165CA6C6FF26B7CB56DAC4B /* StreamingThrottlerTests.swift */,
+				C7EAB2BA49163101148343F2 /* MessageCodableTests.swift */,
+				D8989636F4FC91D290A1EAD4 /* ChatViewModelContinuationTests.swift */,
+			);
+			path = AIChatTests;
+			sourceTree = "<group>";
+		};
 		F980B8F32F528D9E00E689FA = {
 			isa = PBXGroup;
 			children = (
@@ -91,17 +102,6 @@
 				0056B6441390E88DC163C322 /* AIChatTests.xctest */,
 			);
 			name = Products;
-			sourceTree = "<group>";
-		};
-		7A85E67E834C9F3F114821F6 /* AIChatTests */ = {
-			isa = PBXGroup;
-			children = (
-				5AE1918AC79B5B6293A60127 /* StreamingContinuationPrefixFilterTests.swift */,
-				E165CA6C6FF26B7CB56DAC4B /* StreamingThrottlerTests.swift */,
-				C7EAB2BA49163101148343F2 /* MessageCodableTests.swift */,
-				D8989636F4FC91D290A1EAD4 /* ChatViewModelContinuationTests.swift */,
-			);
-			path = AIChatTests;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -241,6 +241,33 @@
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		456252B944B02468778CBB7E /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 66R22WKX8J;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = zhouyijian.AIChat11Tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/AIChat.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/AIChat";
+			};
+			name = Release;
+		};
 		D7E2D223D812C098638022D7 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -268,33 +295,6 @@
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/AIChat.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/AIChat";
 			};
 			name = Debug;
-		};
-		456252B944B02468778CBB7E /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				BUNDLE_LOADER = "$(TEST_HOST)";
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 66R22WKX8J;
-				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/Frameworks",
-					"@loader_path/Frameworks",
-				);
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = zhouyijian.AIChat11Tests;
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = iphoneos;
-				SWIFT_APPROACHABLE_CONCURRENCY = YES;
-				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
-				SWIFT_EMIT_LOC_STRINGS = NO;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/AIChat.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/AIChat";
-			};
-			name = Release;
 		};
 		F980B9102F528D9F00E689FA /* Debug */ = {
 			isa = XCBuildConfiguration;

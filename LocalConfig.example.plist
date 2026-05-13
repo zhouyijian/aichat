@@ -12,5 +12,11 @@
 	<integer>2048</integer>
 	<key>StreamingTemperature</key>
 	<real>1.0</real>
+	<key>ToolPlannerMaxTokens</key>
+	<integer>1024</integer>
+	<key>ImageGenerationEndpointURL</key>
+	<string>https://api.minimaxi.com/v1/image_generation</string>
+	<key>ImageGenerationModel</key>
+	<string>image-01</string>
 </dict>
 </plist>

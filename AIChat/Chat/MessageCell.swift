@@ -807,6 +807,7 @@ final class ChatImageBlockCell: ChatBubbleCell {
     private var task: URLSessionDataTask?
     private var currentURL: URL?
     private var currentAlt: String?
+    var onTapImage: ((_ url: URL, _ image: UIImage?, _ caption: String?) -> Void)?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -823,6 +824,7 @@ final class ChatImageBlockCell: ChatBubbleCell {
         task = nil
         currentURL = nil
         currentAlt = nil
+        onTapImage = nil
         imageView.image = nil
         captionLabel.text = nil
         placeholderLabel.isHidden = false
@@ -833,7 +835,8 @@ final class ChatImageBlockCell: ChatBubbleCell {
         configureChrome(for: item)
 
         guard case .image(let urlString, let alt) = item.kind,
-              let url = URL(string: urlString) else {
+              let url = URL(string: urlString),
+              let resolvedURL = GeneratedImageStore.resolvedURL(for: url) else {
             showFailure(alt: nil)
             return
         }
@@ -856,8 +859,13 @@ final class ChatImageBlockCell: ChatBubbleCell {
             return
         }
 
+        if resolvedURL.isFileURL {
+            loadLocalImage(resolvedURL, cacheKey: url, alt: alt)
+            return
+        }
+
         task?.cancel()
-        task = URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+        task = URLSession.shared.dataTask(with: resolvedURL) { [weak self] data, _, _ in
             guard let self, let data, let image = UIImage(data: data) else {
                 DispatchQueue.main.async { [weak self] in
                     guard self?.currentURL == url else { return }
@@ -876,16 +884,38 @@ final class ChatImageBlockCell: ChatBubbleCell {
         task?.resume()
     }
 
+    private func loadLocalImage(_ fileURL: URL, cacheKey: URL, alt: String?) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let data = try? Data(contentsOf: fileURL),
+                  let image = UIImage(data: data) else {
+                DispatchQueue.main.async { [weak self] in
+                    guard self?.currentURL == cacheKey else { return }
+                    self?.showFailure(alt: alt)
+                }
+                return
+            }
+
+            Self.imageCache.setObject(image, forKey: cacheKey as NSURL)
+            DispatchQueue.main.async { [weak self] in
+                guard self?.currentURL == cacheKey else { return }
+                self?.imageView.image = image
+                self?.placeholderLabel.isHidden = true
+            }
+        }
+    }
+
     private func setupImageViews() {
         imageView.contentMode = .scaleAspectFill
         imageView.clipsToBounds = true
         imageView.backgroundColor = .tertiarySystemBackground
         imageView.layer.cornerRadius = 10
         imageView.layer.masksToBounds = true
+        imageView.isUserInteractionEnabled = true
+        imageView.accessibilityTraits = [.image, .button]
 
         captionLabel.font = .systemFont(ofSize: 12)
         captionLabel.textColor = .secondaryLabel
-        captionLabel.numberOfLines = 2
+        captionLabel.numberOfLines = 0
 
         placeholderLabel.font = .systemFont(ofSize: 13)
         placeholderLabel.textColor = .secondaryLabel
@@ -907,6 +937,9 @@ final class ChatImageBlockCell: ChatBubbleCell {
             make.center.equalToSuperview()
             make.leading.trailing.equalToSuperview().inset(12)
         }
+
+        let tapGesture = UITapGestureRecognizer(target: self, action: #selector(didTapImage))
+        imageView.addGestureRecognizer(tapGesture)
     }
 
     private func showFailure(alt: String?) {
@@ -915,6 +948,12 @@ final class ChatImageBlockCell: ChatBubbleCell {
         placeholderLabel.isHidden = false
         captionLabel.text = alt
         captionLabel.isHidden = alt?.isEmpty ?? true
+    }
+
+    @objc private func didTapImage() {
+        guard let currentURL else { return }
+        let displayURL = GeneratedImageStore.resolvedURL(for: currentURL) ?? currentURL
+        onTapImage?(displayURL, imageView.image, currentAlt)
     }
 }
 

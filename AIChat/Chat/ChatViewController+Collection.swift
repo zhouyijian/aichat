@@ -131,6 +131,9 @@ private extension ChatViewController {
                 for: indexPath
             ) as! ChatImageBlockCell
             cell.configure(with: item)
+            cell.onTapImage = { [weak self] url, image, caption in
+                self?.presentImageBrowser(url: url, image: image, caption: caption)
+            }
             configureCopyActions(for: cell, item: item)
             return cell
 
@@ -172,6 +175,9 @@ private extension ChatViewController {
             configureCopyActions(for: cell, item: item)
         case (let cell as ChatImageBlockCell, .image):
             cell.configure(with: item)
+            cell.onTapImage = { [weak self] url, image, caption in
+                self?.presentImageBrowser(url: url, image: image, caption: caption)
+            }
             configureCopyActions(for: cell, item: item)
         case (let cell as ChatControlCell, .control):
             cell.configure(with: item)
@@ -200,6 +206,11 @@ private extension ChatViewController {
         UIPasteboard.general.string = text
         let generator = UINotificationFeedbackGenerator()
         generator.notificationOccurred(.success)
+    }
+
+    func presentImageBrowser(url: URL, image: UIImage?, caption: String?) {
+        let browser = ImageBrowserViewController(imageURL: url, image: image, caption: caption)
+        present(browser, animated: true)
     }
 
     func refreshMessageItems(
@@ -358,7 +369,14 @@ extension ChatViewController {
             )
 
         case .image(_, let alt):
-            let captionHeight = (alt?.isEmpty == false) ? 28.0 : 0
+            let captionText = alt?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let captionHeight = captionText.isEmpty
+                ? 0
+                : 6 + textHeight(
+                    text: captionText,
+                    font: .systemFont(ofSize: 12),
+                    width: max(0, containerWidth(for: item, within: width) - 20)
+                )
             return outerVerticalInsets + 20 + 180 + captionHeight
 
         case .control:

@@ -78,6 +78,7 @@ nonisolated struct Message: Hashable, Sendable, Codable {
     var isReasoningExpanded: Bool
     var layoutVersion: Int
     var maxTokenHitCount: Int?
+    var toolResult: ToolResultRecord?
     let createdAt: Date
     var status: Status
 
@@ -91,6 +92,7 @@ nonisolated struct Message: Hashable, Sendable, Codable {
         isReasoningExpanded: Bool = false,
         layoutVersion: Int = 0,
         maxTokenHitCount: Int? = nil,
+        toolResult: ToolResultRecord? = nil,
         createdAt: Date = Date(),
         status: Status = .success
     ) {
@@ -110,6 +112,7 @@ nonisolated struct Message: Hashable, Sendable, Codable {
         self.isReasoningExpanded = isReasoningExpanded
         self.layoutVersion = layoutVersion
         self.maxTokenHitCount = maxTokenHitCount
+        self.toolResult = toolResult
         self.createdAt = createdAt
         self.status = status
     }
@@ -149,6 +152,28 @@ nonisolated struct Message: Hashable, Sendable, Codable {
 
     mutating func advanceLayoutVersion() {
         layoutVersion &+= 1
+    }
+}
+
+nonisolated struct ToolResultRecord: Hashable, Sendable, Codable {
+    let toolName: String
+    let ok: Bool
+    let displayText: String
+    let structuredData: JSONValue
+    let createdAt: Date
+
+    init(
+        toolName: String,
+        ok: Bool,
+        displayText: String,
+        structuredData: JSONValue,
+        createdAt: Date = Date()
+    ) {
+        self.toolName = toolName
+        self.ok = ok
+        self.displayText = displayText
+        self.structuredData = structuredData
+        self.createdAt = createdAt
     }
 }
 
